@@ -1,6 +1,7 @@
 library(shiny)
 library(bslib)
 library(scrutiny)
+library(recalc)
 
 # # Deploy like this:
 # rsconnect::deployApp(
@@ -10,52 +11,61 @@ library(scrutiny)
 
 addResourcePath("images", "images")
 
+MAX_PAIRS <- 15
 MAX_ROWS <- 15
 
 
 # Helpers -----------------------------------------------------------------
 
 parse_num <- function(s) {
-  if (is.null(s) || !nzchar(trimws(s))) {
+  if (is.null(s)) {
     return(NA_real_)
   }
-  suppressWarnings(as.numeric(gsub(",", ".", trimws(s))))
+  s <- gsub(",", ".", trimws(s))
+  # Plain decimal notation only. as.numeric() alone would also accept "Inf",
+  # hex ("0x10") and exponents, none of which is a reported summary statistic
+  # with countable decimal places.
+  if (!grepl("^[+-]?([0-9]+\\.?[0-9]*|\\.[0-9]+)$", s)) {
+    return(NA_real_)
+  }
+  as.numeric(s)
+}
+
+dp_of <- function(s) {
+  decimal_places_scalar(gsub(",", ".", trimws(s)))
 }
 
 safe_grim <- function(x_str, n_str, items, percent = FALSE) {
   x <- parse_num(x_str)
   n <- suppressWarnings(as.integer(parse_num(n_str)))
+  # grim() adds 2 to digits_x internally when percent = TRUE, so we must not add
+  # it here as well: doing so would give percentages dp + 4 effective decimal
+  # places, making the test wrongly strict and disagreeing with
+  # grim_uninformative() (which relies on grim_probability()'s internal +2).
   dx <- decimal_places_scalar(gsub(",", ".", trimws(x_str)))
-  if (percent) {
-    dx <- dx + 2L
-  }
   it <- suppressWarnings(as.integer(items))
   if (anyNA(c(x, n, it)) || n < 2 || it < 1) {
     return(NA)
   }
-  tryCatch(
-    grim(x = x, n = n, digits_x = dx, items = it, percent = percent),
-    error = function(e) NA
-  )
+  # No tryCatch here or in the other test wrappers: an error means the test
+  # could not be run, which evaluate_row() reports instead of silently
+  # treating the row as untested.
+  grim(x = x, n = n, digits_x = dx, items = it, percent = percent)
 }
 
 grim_uninformative <- function(x_str, n_str, items, percent = FALSE) {
+  x <- parse_num(x_str)
   n <- suppressWarnings(as.integer(parse_num(n_str)))
-  dx <- decimal_places_scalar(gsub(",", ".", trimws(x_str)))
   it <- suppressWarnings(as.integer(items))
-  x_clean <- gsub(",", ".", trimws(x_str))
-  if (anyNA(c(n, dx, it)) || is.na(parse_num(x_str)) || n < 2 || it < 1) {
+  if (anyNA(c(x, n, it)) || n < 2 || it < 1) {
     return(FALSE)
   }
-  p <- tryCatch(
-    grim_probability(
-      x = x_clean,
-      n = n,
-      digits_x = dx,
-      items = it,
-      percent = percent
-    ),
-    error = function(e) NA_real_
+  p <- grim_probability(
+    x = x,
+    n = n,
+    digits_x = dp_of(x_str),
+    items = it,
+    percent = percent
   )
   isTRUE(p == 0)
 }
@@ -70,22 +80,16 @@ safe_grimmer <- function(x_str, sd_str, n_str, items) {
   if (anyNA(c(x, sd, n, it)) || n < 2 || it < 1) {
     return(list(ok = NA, reason = ""))
   }
-  r <- tryCatch(
-    grimmer(
-      x = x,
-      sd = sd,
-      n = n,
-      digits_x = dx,
-      digits_sd = ds,
-      items = it,
-      show_reason = TRUE
-    ),
-    error = function(e) NULL
+  # grimmer() itself returns a bare logical; only grimmer_map() can say which
+  # sub-test failed.
+  r <- grimmer_map(
+    tibble::tibble(x = x, sd = sd, n = n),
+    digits_x = dx,
+    digits_sd = ds,
+    items = it,
+    show_reason = TRUE
   )
-  if (is.null(r)) {
-    return(list(ok = NA, reason = ""))
-  }
-  list(ok = as.logical(r[[1]]), reason = r[[2]])
+  list(ok = as.logical(r$consistency), reason = r$reason)
 }
 
 safe_bounds <- function(x_str, sd_str, n_str, min_str, max_str) {
@@ -98,41 +102,41 @@ safe_bounds <- function(x_str, sd_str, n_str, min_str, max_str) {
   mn <- parse_num(min_str)
   mx <- parse_num(max_str)
   reasons <- character(0)
-  if (!anyNA(c(x, mn, mx)) && x < mn || x > mx) {
+  if (anyNA(c(x, mn, mx))) {
+    return(reasons)
+  }
+  # The reported mean and SD are rounded, so the true values may lie anywhere
+  # within half a unit of the last reported decimal place. Only flag what no
+  # value in those rounding intervals could satisfy. `eps` absorbs
+  # floating-point error at the interval edges.
+  eps <- sqrt(.Machine$double.eps)
+  half <- 0.5 * 10^(-dp_of(x_str))
+  lo <- max(x - half, mn)
+  hi <- min(x + half, mx)
+  mean_out <- lo > hi + eps
+  if (mean_out) {
     reasons <- c(reasons, "Mean out of bounds")
   }
   sd_given <- !is.null(sd_str) && nzchar(trimws(sd_str))
   if (sd_given) {
     sd <- parse_num(sd_str)
     n <- suppressWarnings(as.integer(parse_num(n_str)))
-    if (!anyNA(c(x, sd, n, mn, mx)) && n >= 2 && mx > mn) {
-      if (sd <= 0) {
-        reasons <- c(reasons, "SD must be > 0")
-      } else if (x >= mn && x <= mx) {
-        sd_max <- sqrt((mx - x) * (x - mn) * n / (n - 1))
-        ds <- decimal_places_scalar(gsub(",", ".", trimws(sd_str)))
-        tol <- 0.5 * 10^(-ds)
-        if (sd > sd_max + tol) {
-          reasons <- c(reasons, "SD exceeds Bhatia–Davis bound")
-        }
+    if (!anyNA(c(sd, n)) && n >= 2 && mx > mn) {
+      # Bhatia–Davis upper bound on the variance for data confined to
+      # [min, max] with mean m: (max - m) * (m - min), times n / (n - 1) for
+      # the sample variance. It is largest at the midpoint of the scale, so
+      # take the possible true mean closest to the midpoint. When no possible
+      # mean lies inside [min, max], no in-range data exist at all, so no SD
+      # is valid and both reasons are reported.
+      m <- min(max((mn + mx) / 2, lo), hi)
+      var_max <- max((mx - m) * (m - mn), 0) * n / (n - 1)
+      tol <- 0.5 * 10^(-dp_of(sd_str))
+      if (mean_out || sd - tol > sqrt(var_max) + eps) {
+        reasons <- c(reasons, "SD exceeds Bhatia–Davis bound")
       }
     }
   }
   reasons
-}
-
-short_reason <- function(reason) {
-  if (reason == "GRIM inconsistent") {
-    return("GRIM")
-  }
-  if (grepl("GRIMMER inconsistent", reason)) {
-    m <- regmatches(reason, regexpr("\\d+", reason))
-    if (length(m) > 0 && nzchar(m)) {
-      return(paste0("GRIMMER ", m))
-    }
-    return("GRIMMER")
-  }
-  reason
 }
 
 friendly_reason <- function(reason) {
@@ -140,9 +144,50 @@ friendly_reason <- function(reason) {
     return("Mean fails GRIM")
   }
   if (grepl("GRIMMER inconsistent", reason)) {
+    # grimmer() reports which of its 3 sub-tests failed, e.g.
+    # "GRIMMER inconsistent (test 3)". Keep that number so the badge matches
+    # the Guidance promise that the message says which test failed.
+    m <- regmatches(reason, regexpr("\\d+", reason))
+    if (length(m) > 0 && nzchar(m)) {
+      return(paste0("SD fails GRIMMER (test ", m, ")"))
+    }
     return("SD fails GRIMMER")
   }
   reason
+}
+
+fmt_p <- function(p, digits = 3) {
+  if (is.null(p) || length(p) == 0 || is.na(p)) {
+    return("NA")
+  }
+  digits <- max(1L, as.integer(digits))
+  floor_val <- 10^(-digits)
+  r <- round(p, digits)
+  # Only values that would otherwise print as a misleading 0 or 1 get an
+  # inequality sign.
+  if (r < floor_val / 2) {
+    return(paste0("<", formatC(floor_val, format = "f", digits = digits)))
+  }
+  if (r > 1 - floor_val / 2 && p < 1) {
+    return(paste0(">", formatC(1 - floor_val, format = "f", digits = digits)))
+  }
+  formatC(r, format = "f", digits = digits)
+}
+
+# Display symbol for a recalc p_operator value.
+op_symbol <- function(op) {
+  if (is.null(op) || !nzchar(op)) {
+    return("=")
+  }
+  switch(
+    op,
+    equals = "=",
+    less_than = "<",
+    greater_than = ">",
+    less_than_or_equal_to = "<=",
+    greater_than_or_equal_to = ">=",
+    "="
+  )
 }
 
 
@@ -158,7 +203,13 @@ validate_combined_row <- function(
   max_str = NULL
 ) {
   if (!is.null(x_str) && nzchar(trimws(x_str))) {
-    if (is.na(parse_num(x_str))) return("Mean must be a number")
+    x_num <- parse_num(x_str)
+    if (is.na(x_num)) {
+      return("Mean must be a number")
+    }
+    if (isTRUE(type == "Percentage") && (x_num < 0 || x_num > 100)) {
+      return("Percentage must be between 0 and 100")
+    }
   }
   sd_given <- !is.null(sd_str) && nzchar(trimws(sd_str))
   min_given <- !is.null(min_str) && nzchar(trimws(min_str))
@@ -168,8 +219,12 @@ validate_combined_row <- function(
       "For percentages with SD, Min and Max are required (typically 0 and 100)"
     )
   }
-  if (sd_given && is.na(parse_num(sd_str))) {
-    return("SD must be a number")
+  if (sd_given) {
+    sd_num <- parse_num(sd_str)
+    if (is.na(sd_num)) {
+      return("SD must be a number")
+    }
+    if (sd_num < 0) return("SD cannot be negative")
   }
   if (!is.null(n_str) && nzchar(trimws(n_str))) {
     n_num <- parse_num(n_str)
@@ -179,12 +234,19 @@ validate_combined_row <- function(
     if (n_num != round(n_num)) {
       return("N must be a whole number")
     }
-    if (n_num < 2) return("N must be at least 2")
-  }
-  if (!is.null(items) && !is.na(items)) {
-    if (items != round(items) || items < 1) {
-      return("Items must be a positive whole number")
+    if (n_num < 2) {
+      return("N must be at least 2")
     }
+    if (n_num > .Machine$integer.max) return("N is too large")
+  }
+  if (
+    is.null(items) ||
+      is.na(items) ||
+      items != round(items) ||
+      items < 1 ||
+      items > .Machine$integer.max
+  ) {
+    return("Items must be a positive whole number")
   }
   if (min_given && is.na(parse_num(min_str))) {
     return("Min must be a number")
@@ -205,17 +267,51 @@ validate_combined_row <- function(
 
 # Combined evaluator ------------------------------------------------------
 
-# Returns: list(ok, reasons, tests_run, err)
+# Returns: list(ok, reasons, tests_run, notes, err, uninformative, grim_digits)
 # - ok: TRUE / FALSE / NA (NA = nothing testable)
 # - reasons: character vector of failure reasons (friendly form)
 # - tests_run: character vector e.g. c("GRIM", "Bounds")
-# - err: validation error string (or NULL); when set, ok = NA
-evaluate_row <- function(x_str, sd_str, n_str, items, type, min_str, max_str) {
+# - err: validation or internal error string (or NULL); when set, ok = NA
+# - uninformative: TRUE if GRIM ran but could not have failed
+# - grim_digits: decimal places GRIM worked with (for the uninformative label)
+evaluate_row <- function(...) {
+  # A test that throws could not be run (e.g. after a breaking change in
+  # scrutiny). Report that as an error instead of quietly showing a verdict
+  # based on the remaining tests.
+  tryCatch(
+    evaluate_row_unsafe(...),
+    error = function(e) {
+      msg <- paste(
+        "Internal error:",
+        sub("\n.*", "", conditionMessage(e))
+      )
+      list(
+        ok = NA,
+        reasons = msg,
+        tests_run = character(0),
+        notes = character(0),
+        err = msg
+      )
+    }
+  )
+}
+
+evaluate_row_unsafe <- function(
+  x_str,
+  sd_str,
+  n_str,
+  items,
+  type,
+  min_str,
+  max_str,
+  integer = TRUE
+) {
   if (is.null(x_str) || !nzchar(trimws(x_str))) {
     return(list(
       ok = NA,
       reasons = character(0),
       tests_run = character(0),
+      notes = character(0),
       err = NULL
     ))
   }
@@ -233,6 +329,7 @@ evaluate_row <- function(x_str, sd_str, n_str, items, type, min_str, max_str) {
       ok = NA,
       reasons = err,
       tests_run = character(0),
+      notes = character(0),
       err = err
     ))
   }
@@ -245,19 +342,35 @@ evaluate_row <- function(x_str, sd_str, n_str, items, type, min_str, max_str) {
 
   reasons <- character(0)
   tests_run <- character(0)
+  notes <- character(0)
+  uninformative <- FALSE
 
-  grim_ok <- safe_grim(x_str, n_str, items, percent = is_percent)
-  if (!is.na(grim_ok)) {
-    tests_run <- c(tests_run, "GRIM")
-    if (!grim_ok) reasons <- c(reasons, "Mean fails GRIM")
-  }
+  # GRIM and GRIMMER are only valid for integer data. When the data are not
+  # flagged as integer, skip them and say so; the Bounds checks (mean within
+  # [min, max] and the Bhatia–Davis SD bound) still apply to continuous data.
+  if (isTRUE(integer)) {
+    grim_label <- if (is_percent) "Percentage fails GRIM" else "Mean fails GRIM"
+    grim_ok <- safe_grim(x_str, n_str, items, percent = is_percent)
+    if (!is.na(grim_ok)) {
+      tests_run <- c(tests_run, "GRIM")
+      if (!grim_ok) {
+        reasons <- c(reasons, grim_label)
+      }
+      uninformative <- grim_uninformative(
+        x_str,
+        n_str,
+        items,
+        percent = is_percent
+      )
+    }
 
-  if (sd_given && !is_percent) {
-    res <- safe_grimmer(x_str, sd_str, n_str, items)
-    if (!is.na(res$ok)) {
-      tests_run <- c(tests_run, "GRIMMER")
-      if (!res$ok) {
-        reasons <- c(reasons, friendly_reason(res$reason))
+    if (sd_given && !is_percent) {
+      res <- safe_grimmer(x_str, sd_str, n_str, items)
+      if (!is.na(res$ok)) {
+        tests_run <- c(tests_run, "GRIMMER")
+        if (!res$ok) {
+          reasons <- c(reasons, friendly_reason(res$reason))
+        }
       }
     }
   }
@@ -270,21 +383,209 @@ evaluate_row <- function(x_str, sd_str, n_str, items, type, min_str, max_str) {
     }
   }
 
+  # Explain the absence of a GRIM/GRIMMER result. When Bounds still yields a
+  # badge, word the note so it qualifies that verdict rather than seeming to
+  # contradict it: a "Consistent" here covers the Bounds checks only.
+  if (!isTRUE(integer)) {
+    notes <- c(
+      notes,
+      if (length(tests_run) == 0) {
+        "GRIM/GRIMMER only apply to integer data"
+      } else {
+        "Bounds only; GRIM/GRIMMER need integer data"
+      }
+    )
+  }
+
   if (length(tests_run) == 0) {
     return(list(
       ok = NA,
       reasons = character(0),
       tests_run = character(0),
+      notes = notes,
       err = NULL
     ))
   }
+
+  # A mean that fails GRIM makes GRIMMER fail for the same "GRIM inconsistent"
+  # reason, which friendly_reason() maps back to "Mean fails GRIM". Drop the
+  # duplicate so the badge doesn't read "Mean fails GRIM; Mean fails GRIM".
+  reasons <- unique(reasons)
 
   list(
     ok = length(reasons) == 0,
     reasons = reasons,
     tests_run = tests_run,
-    err = NULL
+    notes = notes,
+    err = NULL,
+    uninformative = uninformative,
+    # GRIM works on the proportion for percentages, so its granularity is
+    # dp + 2.
+    grim_digits = dp_of(x_str) + if (is_percent) 2L else 0L
   )
+}
+
+
+# t-test recalculation evaluator ------------------------------------------
+
+# Recalculates the independent-samples t-test p-value from the two groups'
+# summary statistics (M, SD, N) using recalc::recalc_independent_t_p(), and -
+# when a reported p is supplied - reports whether that p is reproducible.
+#
+# Returns list(status, ...) where status is one of:
+# - "blank":      nothing entered for this pair yet
+# - "incomplete": some but not all of M/SD/N for both groups present
+# - "error":      an explicit problem (with $msg)
+# - "ok":         recalculated (with $min_p, $max_p, $p_given, $p_reported,
+#                 $inbounds, $p_digits, $mixed_digits)
+evaluate_pair_ttest <- function(
+  m1s,
+  sd1s,
+  n1s,
+  m2s,
+  sd2s,
+  n2s,
+  p_str,
+  p_operator = "equals"
+) {
+  if (is.null(p_operator) || !nzchar(p_operator)) {
+    p_operator <- "equals"
+  }
+  # A reported p outside [0, 1] is invalid regardless of whether the group
+  # statistics are complete, so flag it before the completeness checks below.
+  if (!is.null(p_str) && nzchar(trimws(p_str))) {
+    p_check <- parse_num(p_str)
+    if (is.na(p_check)) {
+      return(list(status = "error", msg = "Reported p must be a number"))
+    }
+    if (p_check < 0 || p_check > 1) {
+      return(list(status = "error", msg = "Reported p must be between 0 and 1"))
+    }
+  }
+  cells <- list(m1s, sd1s, n1s, m2s, sd2s, n2s)
+  filled <- vapply(
+    cells,
+    function(s) !is.null(s) && nzchar(trimws(s)),
+    logical(1)
+  )
+  if (!any(filled)) {
+    return(list(status = "blank"))
+  }
+  if (!all(filled)) {
+    return(list(status = "incomplete"))
+  }
+
+  m1 <- parse_num(m1s)
+  m2 <- parse_num(m2s)
+  sd1 <- parse_num(sd1s)
+  sd2 <- parse_num(sd2s)
+  n1 <- parse_num(n1s)
+  n2 <- parse_num(n2s)
+
+  if (anyNA(c(m1, m2, sd1, sd2, n1, n2))) {
+    return(list(status = "error", msg = "Mean, SD and N must be numbers"))
+  }
+  if (
+    n1 != round(n1) || n2 != round(n2) || max(n1, n2) > .Machine$integer.max
+  ) {
+    return(list(
+      status = "error",
+      msg = "N must be a whole number in both groups"
+    ))
+  }
+  if (n1 < 2 || n2 < 2) {
+    return(list(status = "error", msg = "N must be ≥ 2 in both groups"))
+  }
+  if (sd1 < 0 || sd2 < 0) {
+    return(list(status = "error", msg = "SD cannot be negative"))
+  }
+  n1 <- as.integer(n1)
+  n2 <- as.integer(n2)
+
+  # Reported p was already validated to lie in [0, 1] above.
+  p_given <- !is.null(p_str) && nzchar(trimws(p_str))
+  p_num <- if (p_given) parse_num(p_str) else NULL
+
+  # recalc requires a single decimal-place count for the means and one for the
+  # SDs. Baseline tables almost always report both groups to the same
+  # precision. If they differ, use the smaller count for both: pretending the
+  # coarser value had more decimals would shrink its rounding interval and
+  # could wrongly flag a correct p. The finer value is rounded to the coarser
+  # precision, whose rounding interval contains its own, so the recalculated
+  # range can only widen.
+  m_digits <- min(dp_of(m1s), dp_of(m2s))
+  sd_digits <- min(dp_of(sd1s), dp_of(sd2s))
+  mixed_digits <- dp_of(m1s) != dp_of(m2s) || dp_of(sd1s) != dp_of(sd2s)
+  p_digits <- if (p_given) max(1L, dp_of(p_str)) else 3L
+
+  # A finer value exactly halfway between two coarser ones (4.15 at 1 decimal)
+  # has a rounding interval straddling both, so every such combination is
+  # recalculated and the results are pooled.
+  grid <- expand.grid(
+    m1 = coarsen(m1, m_digits),
+    m2 = coarsen(m2, m_digits),
+    sd1 = coarsen(sd1, sd_digits),
+    sd2 = coarsen(sd2, sd_digits)
+  )
+  reps <- tryCatch(
+    lapply(seq_len(nrow(grid)), function(i) {
+      suppressWarnings(recalc::recalc_independent_t_p(
+        m1 = grid$m1[i],
+        m2 = grid$m2[i],
+        sd1 = grid$sd1[i],
+        sd2 = grid$sd2[i],
+        n1 = n1,
+        n2 = n2,
+        m_digits = m_digits,
+        sd_digits = sd_digits,
+        rounding = "either",
+        p = p_num,
+        p_digits = p_digits,
+        p_operator = p_operator,
+        alternative = "two.sided",
+        direction = "both"
+      ))$reproduced
+    }),
+    error = function(e) {
+      paste("Could not recalculate:", sub("\n.*", "", conditionMessage(e)))
+    }
+  )
+  if (is.character(reps)) {
+    return(list(status = "error", msg = reps))
+  }
+  min_p <- min(vapply(reps, function(r) r$min_p, numeric(1)))
+  max_p <- max(vapply(reps, function(r) r$max_p, numeric(1)))
+  if (anyNA(c(min_p, max_p))) {
+    return(list(status = "error", msg = "Could not recalculate"))
+  }
+
+  list(
+    status = "ok",
+    p_given = p_given,
+    p_reported = if (p_given) p_num else NA_real_,
+    min_p = min_p,
+    max_p = max_p,
+    inbounds = if (p_given) {
+      any(vapply(reps, function(r) isTRUE(r$p_inbounds), logical(1)))
+    } else {
+      NA
+    },
+    p_digits = p_digits,
+    p_operator = p_operator,
+    mixed_digits = mixed_digits
+  )
+}
+
+MIXED_DIGITS_NOTE <- "Groups differ in decimal places; coarser precision used"
+
+# Candidate values of `v` when re-expressed at `digits` decimal places: its
+# rounded value, or both neighbours if it sits exactly halfway between them.
+coarsen <- function(v, digits) {
+  s <- v * 10^digits
+  if (abs(s - floor(s) - 0.5) < 1e-8) {
+    return(c(floor(s), ceiling(s)) / 10^digits)
+  }
+  round(s) / 10^digits
 }
 
 
@@ -307,7 +608,7 @@ uninformative_label <- function(digits) {
   tooltip(
     span(
       class = "text-muted",
-      style = "font-size:.75rem; white-space:nowrap; cursor:help;",
+      style = "font-size:.75rem; cursor:help;",
       "Uninformative GRIM"
     ),
     paste0(
@@ -322,21 +623,44 @@ result_ui <- function(
   ok,
   reasons = character(0),
   uninformative = FALSE,
-  digits = NULL
+  digits = NULL,
+  notes = character(0)
 ) {
+  note_spans <- lapply(notes, function(n) {
+    span(
+      class = "text-muted",
+      style = "font-size:.72rem; line-height:1.2;",
+      n
+    )
+  })
+
+  # NA = no pass/fail decision (nothing testable). Still surface any notes,
+  # e.g. the "GRIM/GRIMMER only apply to integer data" message.
   if (is.na(ok)) {
-    return(span())
+    if (length(note_spans) == 0) {
+      return(span())
+    }
+    return(do.call(
+      div,
+      c(list(class = "d-flex flex-wrap align-items-center gap-2"), note_spans)
+    ))
   }
   if (ok) {
     badge <- span(
       class = "badge rounded-pill bg-success px-3 py-2",
       HTML("&#10003;&nbsp; Consistent")
     )
+    extras <- note_spans
     if (uninformative) {
-      div(
-        class = "d-flex align-items-center gap-2",
-        badge,
-        uninformative_label(digits)
+      extras <- c(extras, list(uninformative_label(digits)))
+    }
+    if (length(extras) > 0) {
+      do.call(
+        div,
+        c(
+          list(class = "d-flex flex-wrap align-items-center gap-2", badge),
+          extras
+        )
       )
     } else {
       badge
@@ -362,6 +686,7 @@ result_ui <- function(
         ))
       )
     }
+    extras <- c(extras, note_spans)
     if (uninformative) {
       extras <- c(extras, list(uninformative_label(digits)))
     }
@@ -369,7 +694,7 @@ result_ui <- function(
       do.call(
         div,
         c(
-          list(class = "d-flex align-items-center gap-2", badge),
+          list(class = "d-flex flex-wrap align-items-center gap-2", badge),
           extras
         )
       )
@@ -377,6 +702,75 @@ result_ui <- function(
       badge
     }
   }
+}
+
+# UI for the t-test recalculation result of a pair.
+ttest_result_ui <- function(tt) {
+  if (is.null(tt) || identical(tt$status, "blank")) {
+    return(span())
+  }
+  if (identical(tt$status, "incomplete")) {
+    return(span(
+      class = "text-muted",
+      style = "font-size:.75rem;",
+      "Awaiting both groups' M, SD, N"
+    ))
+  }
+  if (identical(tt$status, "error")) {
+    return(error_ui(tt$msg))
+  }
+
+  dg <- tt$p_digits
+  range_txt <- paste0(
+    "p ∈ [",
+    fmt_p(tt$min_p, dg),
+    ", ",
+    fmt_p(tt$max_p, dg),
+    "]"
+  )
+  mixed_note <- if (isTRUE(tt$mixed_digits)) {
+    span(
+      class = "text-muted",
+      style = "font-size:.72rem; line-height:1.2;",
+      MIXED_DIGITS_NOTE
+    )
+  }
+
+  if (!isTRUE(tt$p_given)) {
+    return(div(
+      class = "d-flex flex-wrap align-items-center gap-2",
+      span(
+        class = "badge rounded-pill bg-secondary px-3 py-2",
+        "Recalculated"
+      ),
+      span(class = "text-muted", style = "font-size:.72rem;", range_txt),
+      mixed_note
+    ))
+  }
+
+  if (isTRUE(tt$inbounds)) {
+    badge <- span(
+      class = "badge rounded-pill bg-success px-3 py-2",
+      HTML("&#10003;&nbsp; Consistent")
+    )
+    detail_class <- "text-muted"
+  } else {
+    badge <- span(
+      class = "badge rounded-pill bg-danger px-3 py-2",
+      HTML("&#10007;&nbsp; Inconsistent")
+    )
+    detail_class <- "text-danger"
+  }
+  div(
+    class = "d-flex flex-wrap align-items-center gap-2",
+    badge,
+    span(
+      class = detail_class,
+      style = "font-size:.72rem; line-height:1.2;",
+      range_txt
+    ),
+    mixed_note
+  )
 }
 
 summary_bar <- function(results_vec) {
@@ -391,6 +785,10 @@ summary_bar <- function(results_vec) {
     class = "d-flex gap-4 align-items-center px-3 py-2 rounded mt-3",
     style = "background:#f1f3f5; font-size:.875rem; border-left:3px solid #dee2e6;",
     span(
+      class = "text-muted fw-semibold",
+      "GRIM / GRIMMER / Bounds:"
+    ),
+    span(
       class = "text-muted",
       paste(n_tot, if (n_tot == 1) "case" else "cases", "tested")
     ),
@@ -399,8 +797,43 @@ summary_bar <- function(results_vec) {
   )
 }
 
-next_free <- function(active) {
-  candidate <- setdiff(seq_len(MAX_ROWS), active)
+# Summary line for the t-test recalculations across pairs.
+ttest_summary_bar <- function(tts) {
+  decided <- Filter(
+    function(tt) {
+      identical(tt$status, "ok") && isTRUE(tt$p_given) && !is.na(tt$inbounds)
+    },
+    tts
+  )
+  if (length(decided) == 0) {
+    return(NULL)
+  }
+  inbounds <- vapply(decided, function(tt) isTRUE(tt$inbounds), logical(1))
+  n_tot <- length(decided)
+  n_ok <- sum(inbounds)
+  n_bad <- sum(!inbounds)
+  div(
+    class = "d-flex gap-4 align-items-center px-3 py-2 rounded mt-2",
+    style = "background:#f1f3f5; font-size:.875rem; border-left:3px solid #dee2e6;",
+    span(
+      class = "text-muted fw-semibold",
+      "t-test recalculation:"
+    ),
+    span(
+      class = "text-muted",
+      paste(
+        n_tot,
+        if (n_tot == 1) "reported p" else "reported p-values",
+        "checked"
+      )
+    ),
+    span(class = "text-success fw-semibold", paste(n_ok, "consistent")),
+    span(class = "text-danger fw-semibold", paste(n_bad, "inconsistent"))
+  )
+}
+
+next_free <- function(active, max_slots) {
+  candidate <- setdiff(seq_len(max_slots), active)
   if (length(candidate) == 0) {
     return(NULL)
   }
@@ -420,7 +853,7 @@ rm_btn <- function(id) {
     ),
     class = "btn btn-sm p-1 rm-btn",
     style = "line-height:1;",
-    title = "Remove this row"
+    title = "Remove this variable pair"
   )
 }
 
@@ -428,14 +861,14 @@ items_input <- function(id) {
   numericInput(id, NULL, value = 1, min = 1, step = 1, width = "100%")
 }
 
-combined_row <- function(id) {
-  div(
-    id = paste0("cb_slot_", id),
-    style = if (id <= 3) "" else "display:none;",
+# The seven shared data cells (Type, Mean, SD, N, Items, Min, Max) for one
+# group row, where `rid` is the row id stem (e.g. "1a").
+row_data_cells <- function(rid) {
+  tagList(
     div(
       class = "grid-cell",
       selectInput(
-        paste0("cb_type_", id),
+        paste0("cb_type_", rid),
         NULL,
         choices = c("Mean", "Percentage"),
         selected = "Mean",
@@ -445,7 +878,209 @@ combined_row <- function(id) {
     div(
       class = "grid-cell",
       textInput(
-        paste0("cb_x_", id),
+        paste0("cb_x_", rid),
+        NULL,
+        width = "100%",
+        placeholder = "5.23"
+      )
+    ),
+    div(
+      class = "grid-cell",
+      textInput(
+        paste0("cb_sd_", rid),
+        NULL,
+        width = "100%",
+        placeholder = "8.41"
+      )
+    ),
+    div(
+      class = "grid-cell",
+      textInput(
+        paste0("cb_n_", rid),
+        NULL,
+        width = "100%",
+        placeholder = "30"
+      )
+    ),
+    div(class = "grid-cell", items_input(paste0("cb_items_", rid))),
+    div(
+      class = "grid-cell",
+      textInput(
+        paste0("cb_min_", rid),
+        NULL,
+        width = "100%",
+        placeholder = "optional"
+      )
+    ),
+    div(
+      class = "grid-cell",
+      textInput(
+        paste0("cb_max_", rid),
+        NULL,
+        width = "100%",
+        placeholder = "optional"
+      )
+    )
+  )
+}
+
+# A variable pair: two group rows that share one Variable name. The Variable,
+# Reported p, t-test result and remove control sit on the first row only.
+combined_pair <- function(p) {
+  shown <- if (p <= 2) "" else "display:none;"
+  rid_a <- paste0(p, "a")
+  rid_b <- paste0(p, "b")
+  tagList(
+    div(
+      id = paste0("cb_slot_", p, "a"),
+      class = "cb-row pair-start",
+      style = shown,
+      div(
+        class = "grid-cell",
+        textInput(
+          paste0("cb_var_", p),
+          NULL,
+          width = "100%",
+          placeholder = "BDI"
+        )
+      ),
+      div(
+        class = "grid-cell int-cell",
+        checkboxInput(paste0("cb_int_", p), NULL, value = FALSE)
+      ),
+      div(
+        class = "grid-cell",
+        textInput(
+          paste0("cb_grp_", rid_a),
+          NULL,
+          width = "100%",
+          placeholder = "Intervention"
+        )
+      ),
+      row_data_cells(rid_a),
+      div(
+        class = "grid-cell",
+        selectInput(
+          paste0("cb_pop_", p),
+          NULL,
+          choices = c(
+            "=" = "equals",
+            "<" = "less_than",
+            ">" = "greater_than",
+            "<=" = "less_than_or_equal_to",
+            ">=" = "greater_than_or_equal_to"
+          ),
+          selected = "equals",
+          width = "100%"
+        )
+      ),
+      div(
+        class = "grid-cell",
+        textInput(
+          paste0("cb_p_", p),
+          NULL,
+          width = "100%",
+          placeholder = "optional"
+        )
+      ),
+      div(
+        class = "grid-cell d-flex align-items-center",
+        uiOutput(paste0("cb_badge_", rid_a))
+      ),
+      div(
+        class = "grid-cell d-flex align-items-center",
+        uiOutput(paste0("cb_ttest_", p))
+      ),
+      div(class = "grid-cell", rm_btn(paste0("cb_rm_", p)))
+    ),
+    div(
+      id = paste0("cb_slot_", p, "b"),
+      class = "cb-row pair-end",
+      style = shown,
+      div(class = "grid-cell"),
+      div(class = "grid-cell"),
+      div(
+        class = "grid-cell",
+        textInput(
+          paste0("cb_grp_", rid_b),
+          NULL,
+          width = "100%",
+          placeholder = "Control"
+        )
+      ),
+      row_data_cells(rid_b),
+      div(class = "grid-cell"),
+      div(class = "grid-cell"),
+      div(
+        class = "grid-cell d-flex align-items-center",
+        uiOutput(paste0("cb_badge_", rid_b))
+      ),
+      div(class = "grid-cell"),
+      div(class = "grid-cell")
+    )
+  )
+}
+
+
+# Column headers ----------------------------------------------------------
+
+combined_header <- div(
+  class = "cb-row cb-header",
+  div(class = "grid-hdr", "Label (optional)"),
+  div(class = "grid-hdr", "Integer data"),
+  div(class = "grid-hdr", "Group (optional)"),
+  div(class = "grid-hdr", "Type"),
+  div(class = "grid-hdr", "Mean or percentage"),
+  div(class = "grid-hdr", "SD"),
+  div(class = "grid-hdr", "Sample size"),
+  div(class = "grid-hdr", "Items averaged over"),
+  div(class = "grid-hdr", "Logical Min (optional)"),
+  div(class = "grid-hdr", "Logical Max (optional)"),
+  div(class = "grid-hdr", "p operator"),
+  div(class = "grid-hdr", "Reported p (optional)"),
+  div(class = "grid-hdr", "Result (GRIM / GRIMMER / Bounds)"),
+  div(class = "grid-hdr", "Result (p value)"),
+  div()
+)
+
+
+# Single-row tab (GRIM / GRIMMER / Bounds only) ---------------------------
+
+# One independent row: M / SD / N with GRIM / GRIMMER / Bounds, no pairing
+# and no t-test. Uses the `gb_` input-id namespace so it never collides with
+# the paired tab's `cb_` ids.
+single_row <- function(id) {
+  div(
+    id = paste0("gb_slot_", id),
+    class = "sg-row",
+    style = if (id <= 3) "" else "display:none;",
+    div(
+      class = "grid-cell",
+      textInput(
+        paste0("gb_var_", id),
+        NULL,
+        width = "100%",
+        placeholder = "BDI"
+      )
+    ),
+    div(
+      class = "grid-cell int-cell",
+      checkboxInput(paste0("gb_int_", id), NULL, value = FALSE)
+    ),
+    div(
+      class = "grid-cell",
+      selectInput(
+        paste0("gb_type_", id),
+        NULL,
+        choices = c("Mean", "Percentage"),
+        selected = "Mean",
+        width = "100%"
+      )
+    ),
+    div(
+      class = "grid-cell",
+      textInput(
+        paste0("gb_x_", id),
         NULL,
         width = "100%",
         placeholder = "e.g. 5.23"
@@ -454,7 +1089,7 @@ combined_row <- function(id) {
     div(
       class = "grid-cell",
       textInput(
-        paste0("cb_sd_", id),
+        paste0("gb_sd_", id),
         NULL,
         width = "100%",
         placeholder = "optional"
@@ -463,17 +1098,17 @@ combined_row <- function(id) {
     div(
       class = "grid-cell",
       textInput(
-        paste0("cb_n_", id),
+        paste0("gb_n_", id),
         NULL,
         width = "100%",
         placeholder = "e.g. 30"
       )
     ),
-    div(class = "grid-cell", items_input(paste0("cb_items_", id))),
+    div(class = "grid-cell", items_input(paste0("gb_items_", id))),
     div(
       class = "grid-cell",
       textInput(
-        paste0("cb_min_", id),
+        paste0("gb_min_", id),
         NULL,
         width = "100%",
         placeholder = "optional"
@@ -482,7 +1117,7 @@ combined_row <- function(id) {
     div(
       class = "grid-cell",
       textInput(
-        paste0("cb_max_", id),
+        paste0("gb_max_", id),
         NULL,
         width = "100%",
         placeholder = "optional"
@@ -490,16 +1125,16 @@ combined_row <- function(id) {
     ),
     div(
       class = "grid-cell d-flex align-items-center",
-      uiOutput(paste0("cb_badge_", id))
+      uiOutput(paste0("gb_badge_", id))
     ),
-    div(class = "grid-cell", rm_btn(paste0("cb_rm_", id)))
+    div(class = "grid-cell", rm_btn(paste0("gb_rm_", id)))
   )
 }
 
-
-# Column headers ----------------------------------------------------------
-
-combined_header <- div(
+single_header <- div(
+  class = "sg-row sg-header",
+  div(class = "grid-hdr", "Label (optional)"),
+  div(class = "grid-hdr", "Integer data"),
   div(class = "grid-hdr", "Type"),
   div(class = "grid-hdr", "Mean or percentage"),
   div(class = "grid-hdr", "SD (optional)"),
@@ -552,6 +1187,12 @@ custom_css <- tags$style(HTML(
     height: 56px;
     width: auto;
   }
+  /* The brand is not a functional link, so suppress flatly's green
+     (--bs-navbar-brand-hover-color: #18bc9c) hover/focus colour change. */
+  nav.navbar .navbar-brand:hover,
+  nav.navbar .navbar-brand:focus {
+    color: var(--bs-navbar-brand-color, #fff) !important;
+  }
   nav.navbar .navbar-nav {
     align-items: center !important;
     gap: .25rem;
@@ -583,7 +1224,7 @@ custom_css <- tags$style(HTML(
   .btn-outline-primary:hover { background: #2c7be5; color: white; }
 
   /* ── action buttons ──────────────────────────────────────────────────── */
-  #combined_add, #download_csv {
+  #combined_add, #download_csv, #gb_add, #gb_download {
     border: none !important;
     color: #fff !important;
     font-size: .875rem !important;
@@ -592,32 +1233,32 @@ custom_css <- tags$style(HTML(
     border-radius: .375rem !important;
     transition: background-color .2s ease, box-shadow .2s ease, transform .1s ease !important;
   }
-  #combined_add {
+  #combined_add, #gb_add {
     background-color: #2c7be5 !important;
     box-shadow: 0 1px 4px rgba(44,123,229,.35) !important;
   }
-  #combined_add:hover, #combined_add:focus {
+  #combined_add:hover, #combined_add:focus, #gb_add:hover, #gb_add:focus {
     background-color: #1a68d1 !important;
     color: #fff !important;
     box-shadow: 0 4px 12px rgba(44,123,229,.45) !important;
     transform: translateY(-1px);
   }
-  #combined_add:active {
+  #combined_add:active, #gb_add:active {
     background-color: #155ab8 !important;
     transform: translateY(0);
     box-shadow: 0 1px 4px rgba(44,123,229,.35) !important;
   }
-  #download_csv {
+  #download_csv, #gb_download {
     background-color: #495057 !important;
     box-shadow: 0 1px 4px rgba(73,80,87,.35) !important;
   }
-  #download_csv:hover, #download_csv:focus {
+  #download_csv:hover, #download_csv:focus, #gb_download:hover, #gb_download:focus {
     background-color: #343a40 !important;
     color: #fff !important;
     box-shadow: 0 4px 12px rgba(73,80,87,.45) !important;
     transform: translateY(-1px);
   }
-  #download_csv:active {
+  #download_csv:active, #gb_download:active {
     background-color: #212529 !important;
     transform: translateY(0);
     box-shadow: 0 1px 4px rgba(73,80,87,.35) !important;
@@ -625,6 +1266,7 @@ custom_css <- tags$style(HTML(
   .badge { font-size: .8rem !important; font-weight: 500; letter-spacing: .01em; }
   .bg-success { background-color: #12b886 !important; }
   .bg-danger  { background-color: #fa5252 !important; }
+  .bg-secondary { background-color: #868e96 !important; }
   .shiny-input-container { margin-bottom: 0; }
   ::placeholder { color: #adb5bd !important; font-style: italic; }
   .rm-btn { background: transparent !important; border: none !important; opacity: 1 !important; }
@@ -633,11 +1275,14 @@ custom_css <- tags$style(HTML(
   .rm-btn:hover img { filter: brightness(0) invert(1) !important; }
 
   /* ── input grid ──────────────────────────────────────────────────────── */
+  .combined-grid-wrap { overflow-x: auto; }
   .combined-grid {
     display: grid;
-    grid-template-columns: 140px 110px 100px 100px 80px 150px 150px minmax(280px, 1.6fr) auto;
+    grid-template-columns: 120px 80px 110px 115px 90px 80px 75px 100px 90px 90px 80px 90px minmax(200px, 1.1fr) minmax(260px, 1.5fr) auto;
     column-gap: .5rem;
     row-gap: 0;
+    min-width: 1718px;
+    padding-right: 1.25rem;
   }
   .combined-grid > div {
     display: grid;
@@ -645,8 +1290,32 @@ custom_css <- tags$style(HTML(
     grid-template-columns: subgrid;
     align-items: center;
   }
-  .combined-grid > div:first-child { align-items: end; }
+  .combined-grid > div.cb-header { align-items: end; }
+  .cb-row.pair-start { border-top: 2px solid #ced4da; padding-top: 5px; }
+  .cb-row.pair-end { padding-bottom: 7px; }
+
+  /* ── single-row grid (GRIM / GRIMMER / Bounds tab) ───────────────────── */
+  .single-grid-wrap { overflow-x: auto; }
+  .single-grid {
+    display: grid;
+    grid-template-columns: 120px 80px 140px 110px 100px 100px 80px 150px 150px minmax(280px, 1.6fr) auto;
+    column-gap: .5rem;
+    row-gap: 0;
+    min-width: 1418px;
+  }
+  .single-grid > div {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
+    align-items: center;
+  }
+  .single-grid > div.sg-header { align-items: end; }
+
   .grid-cell { padding: 2px 0; }
+  .int-cell { display: flex; align-items: center; justify-content: center; }
+  .int-cell .form-group, .int-cell .checkbox, .int-cell .shiny-input-container { margin: 0 !important; min-height: 0 !important; }
+  .int-cell .form-check { margin: 0 !important; min-height: 0 !important; padding-left: 0 !important; }
+  .int-cell input[type=checkbox] { margin: 0 !important; float: none !important; width: 18px; height: 18px; cursor: pointer; }
   .grid-hdr {
     padding: 4px 0 2px;
     font-size: .8rem;
@@ -657,7 +1326,6 @@ custom_css <- tags$style(HTML(
     word-break: normal;
     hyphens: none;
   }
-  .grid-hdr-n { text-transform: none; letter-spacing: 0; }
 "
 ))
 
@@ -669,7 +1337,7 @@ ui <- page_navbar(
     class = "d-flex align-items-center gap-2",
     tags$img(
       src = "images/inspect-sr.png",
-      alt = "scrutiny",
+      alt = "INSPECT-SR",
       height = "56"
     ),
     "Consistency Tester"
@@ -687,52 +1355,108 @@ ui <- page_navbar(
   header = tagList(custom_css),
 
   nav_panel(
-    "Granularity and Bounds Testing",
+    "GRIM / GRIMMER / Bounds",
     div(
       class = "container py-4",
-      style = "max-width:1250px;",
+      style = "max-width:1470px;",
       card(
-        card_header("GRIM, GRIMMER and TIDES Tests"),
+        card_header("GRIM, GRIMMER and Bounds Tests"),
         card_body(
           p(
             class = "text-muted mb-3",
-            "GRIM checks whether a reported mean of integer data is arithmetically possible given",
-            "the sample size. GRIMMER extends this to also check the standard deviation (SD).",
+            tags$em("Key assumptions:"),
             br(),
             br(),
-            "Enter a mean and N to run GRIM. Adding an SD also runs GRIMMER",
-            "(for means) or, with percentages, only the SD bounds check.",
-            br(),
-            br(),
-            "Use this app for integer data only! ",
-            "Mean-scored multi-item scales (but ",
+            "1. ",
+            tags$em("Items Averaged Over"),
+            " is often misunderstood. It is ",
             tags$em("not"),
-            " sum-scored multi-item scales) require the number of items in",
-            tags$em("Items averaged over", .noWS = "after"),
-            ". Note that this is not the number of items in the scale but",
-            "the number of values already averaged over before (e.g., within-subjects)",
-            "before calculating the mean, as this prior averaging \"uses up\" some of the",
-            "granularity that the test relies on. Variables such as \"age\" or \"days\" are, ",
-            "implicitly single-item scales, therefore ",
-            tags$em("Items averaged over"),
-            "should be set to 1.",
+            " the number of items in a multi-item Likert scale, but the number of items averaged over at the participant level. If the scale is sum-scored (which is the most common scoring method in psychology), no averaging has occurred so ",
+            tags$em("Items Averaged Over"),
+            " = 1. If the scale was mean-scored, then ",
+            tags$em("Items Averaged Over"),
+            " = the number of items in the scale. Variables such as \"age\" or \"days\" are implicitly single-item scales, therefore ",
+            tags$em("Items Averaged Over"),
+            " = 1.",
             br(),
             br(),
-            "Optionally also provide ",
-            tags$em("Min"),
+            "2. ",
+            tags$em("Logical Min"),
             " and ",
-            tags$em("Max"),
-            " (the smallest and largest ",
-            tags$em("possible"),
-            " scores (note: not the observed min and max, but the logical min and max)",
-            " to additionally test that the mean is within bounds and that the SD does",
-            " not exceed the Bhatia–Davis upper bound. For percentages with",
-            " SD, Min and Max are required."
+            tags$em("Logical Max"),
+            " should be set to the scale's logical min and max, not the observed min and max in the data."
           ),
           div(
-            class = "combined-grid",
-            combined_header,
-            tagList(lapply(seq_len(MAX_ROWS), combined_row))
+            class = "single-grid-wrap",
+            div(
+              class = "single-grid",
+              single_header,
+              tagList(lapply(seq_len(MAX_ROWS), single_row))
+            )
+          ),
+          uiOutput("gb_empty"),
+          uiOutput("gb_vis"),
+          div(
+            class = "mt-3 d-flex gap-2",
+            actionButton(
+              "gb_add",
+              "+ Add row"
+            ),
+            downloadButton(
+              "gb_download",
+              "Download CSV"
+            )
+          ),
+          uiOutput("gb_summary")
+        )
+      ),
+      p(
+        class = "text-muted mt-3 mb-0",
+        style = "font-size:.78rem; text-align:center;",
+        "App by Lukas Jung and Ian Hussey, University of Bern."
+      )
+    )
+  ),
+
+  nav_panel(
+    "GRIM / GRIMMER / Bounds / t-test p value",
+    div(
+      class = "container py-4",
+      style = "max-width:1800px;",
+      card(
+        card_header("GRIM, GRIMMER, Bounds and t-test Recalculation"),
+        card_body(
+          p(
+            class = "text-muted mb-3",
+            tags$em("Key assumptions:"),
+            br(),
+            br(),
+            "1. ",
+            tags$em("Items Averaged Over"),
+            " is often misunderstood. It is ",
+            tags$em("not"),
+            " the number of items in a multi-item Likert scale, but the number of items averaged over at the participant level. If the scale is sum-scored (which is the most common scoring method in psychology), no averaging has occurred so ",
+            tags$em("Items Averaged Over"),
+            " = 1. If the scale was mean-scored, then ",
+            tags$em("Items Averaged Over"),
+            " = the number of items in the scale. Variables such as \"age\" or \"days\" are implicitly single-item scales, therefore ",
+            tags$em("Items Averaged Over"),
+            " = 1.",
+            br(),
+            br(),
+            "2. ",
+            tags$em("Logical Min"),
+            " and ",
+            tags$em("Logical Max"),
+            " should be set to the scale's logical min and max, not the observed min and max in the data."
+          ),
+          div(
+            class = "combined-grid-wrap",
+            div(
+              class = "combined-grid",
+              combined_header,
+              tagList(lapply(seq_len(MAX_PAIRS), combined_pair))
+            )
           ),
           uiOutput("combined_empty"),
           uiOutput("combined_vis"),
@@ -740,16 +1464,15 @@ ui <- page_navbar(
             class = "mt-3 d-flex gap-2",
             actionButton(
               "combined_add",
-              "+ Add row",
-              class = "btn btn-grim-add"
+              "+ Add variable"
             ),
             downloadButton(
               "download_csv",
-              "Download CSV",
-              class = "btn btn-grim-dl"
+              "Download CSV"
             )
           ),
-          uiOutput("combined_summary")
+          uiOutput("combined_summary"),
+          uiOutput("ttest_summary")
         )
       ),
       p(
@@ -851,17 +1574,16 @@ ui <- page_navbar(
                 tags$em("Min"),
                 " or above ",
                 tags$em("Max"),
-                "."
-              ),
-              tags$li(
-                "\"SD must be > 0\": a reported SD of zero (or negative) is",
-                " flagged when bounds are supplied."
+                ", even allowing for rounding."
               ),
               tags$li(
                 "\"SD exceeds Bhatia–Davis bound\": for a variable in [Min, Max] ",
                 "with the reported mean and N, the maximum possible sample SD is ",
                 tags$code("sqrt((Max - Mean) * (Mean - Min) * N / (N - 1))"),
-                ". A reported SD above this bound is impossible."
+                ". A reported SD above this bound is impossible. Because the",
+                " reported mean and SD are rounded, the app only flags an SD",
+                " that exceeds the bound for every mean and SD that would",
+                " round to the reported values."
               )
             ),
             "If multiple checks fail, all failing reasons are listed.",
@@ -881,13 +1603,96 @@ ui <- page_navbar(
             ),
             "Bounds inputs (i.e., \"Logical Min (optional)\" and \"Logical Max (optional)\")",
             "are optional. They enable two additional checks: (a) the mean",
-            " must lie inside [Logical Min, Logical Max]; (b) the SD must be greater than 0",
-            " and not exceed the Bhatia–Davis upper bound. When \"Type\" is set to \"Percentage\"",
+            " must lie inside [Logical Min, Logical Max]; (b) the SD must",
+            " not exceed the Bhatia–Davis upper bound. When \"Type\" is set to \"Percentage\"",
             "and an SD is provided, \"Logical Min\" and \"Logical Max\" are required",
             " (typically 0 and 100), and GRIMMER is not run.",
             br(),
             br(),
+            tags$strong("Integer data:"),
+            "GRIM and GRIMMER are only valid if the underlying data are whole",
+            "numbers (e.g., Likert responses, counts, age in years). They are",
+            "therefore only run when you tick the",
+            tags$em("Integer data"),
+            "box, which is unticked by default. Without it, only the Bounds",
+            "checks are run, so a \"Consistent\" result then refers to the",
+            "bounds alone.",
+            br(),
+            br(),
             "Click \"Download CSV\" to get all the results in a tabular file."
+          ),
+          p(
+            tags$strong("t-test recalculation between paired Group rows:"),
+            "Each pair of rows that shares a ",
+            tags$em("Label"),
+            " is treated as the two arms of an independent-samples comparison",
+            " (e.g., intervention vs. control). When both rows have a Mean, SD",
+            " and N, the app recalculates the range of two-sided t-test",
+            " p-values that are compatible with those summary statistics, using",
+            " the ",
+            a(
+              "recalc",
+              href = "https://github.com/ianhussey/recalc",
+              style = "color:#ca225e;"
+            ),
+            " package. The recalculation explores a small multiverse of",
+            " defensible analytic choices: the reported means and SDs are each",
+            " varied within their rounding intervals, and both Student's (pooled)",
+            " and Welch's t-tests are computed, in both effect directions. This",
+            " yields a range ",
+            tags$em("[min p, max p]"),
+            " rather than a single value.",
+            br(),
+            br(),
+            "If you enter a ",
+            tags$em("Reported p"),
+            " on the first row of the pair, the app checks whether that",
+            " reported value falls inside the recalculated range (after rounding",
+            " both to the reported p's precision):"
+          ),
+          tags$ul(
+            tags$li(
+              tags$strong("\"Consistent\""),
+              ": the reported p-value is compatible with the reported means,",
+              " SDs and Ns under at least one of the analytic choices explored."
+            ),
+            tags$li(
+              tags$strong("\"Inconsistent\""),
+              ": no combination of the explored choices yields the reported",
+              " p-value. This warrants a closer look – it may reflect a typo,",
+              " a different (e.g. adjusted or non-parametric) test, a covariate",
+              " adjustment, or an error."
+            )
+          ),
+          p(
+            "The ",
+            tags$em("p operator"),
+            " selector controls how the reported p is compared: ",
+            tags$em("="),
+            " checks that the value lies within the recalculated range, while ",
+            tags$em("<"),
+            ", ",
+            tags$em(">"),
+            ", ",
+            tags$em("<="),
+            " and ",
+            tags$em(">="),
+            " check the reported inequality against that range (useful when a",
+            " paper reports, e.g., \"p < .001\").",
+            br(),
+            br(),
+            "If no reported p is entered, the app simply shows the recalculated",
+            " range. The t-test recalculation uses only the Mean, SD and N; it",
+            " ignores ",
+            tags$em("Type"),
+            ", ",
+            tags$em("Items"),
+            " and the bounds, which apply to GRIM / GRIMMER / Bounds only.",
+            " Decimal precision for the means and SDs is detected automatically",
+            " from the values you enter, so enter them exactly as reported,",
+            " including trailing zeros. If the two groups' means (or SDs) are",
+            " reported to different numbers of decimal places, the coarser",
+            " precision is used for both, which widens the recalculated range."
           ),
           p(
             tags$strong("When GRIM is uninformative:"),
@@ -905,8 +1710,8 @@ ui <- page_navbar(
             "label and adds a corresponding entry to the CSV",
             tags$em("notes"),
             "column.",
-            "If an SD is provided, the GRIMMER SD-based checks (and TIDES,",
-            "where applied) remain informative even when the GRIM portion is not."
+            "If an SD is provided, the GRIMMER SD-based checks",
+            "remain informative even when the GRIM portion is not."
           )
         )
       ),
@@ -961,7 +1766,13 @@ ui <- page_navbar(
               style = "color:#ca225e;",
               .noWS = "after"
             ),
-            ".",
+            ". The t-test p-value recalculation uses the ",
+            a(
+              "recalc",
+              href = "https://github.com/ianhussey/recalc",
+              style = "color:#ca225e;"
+            ),
+            "package.",
             br(),
             br(),
             "Shiny app made by Lukas Jung and Ian Hussey, University of Bern, using the",
@@ -989,24 +1800,56 @@ ui <- page_navbar(
 # Server ------------------------------------------------------------------
 
 server <- function(input, output, session) {
-  slots <- reactiveVal(1:3)
+  # Percentages default to bounds of 0 and 100. Remember which cells were
+  # auto-filled so that switching back to "Mean" removes them again instead of
+  # silently applying percentage bounds to a mean. `prefix` is "gb_" or "cb_";
+  # `rid` is the row id stem.
+  sync_type_bounds <- function(prefix, rid) {
+    defaults <- c(min = "0", max = "100")
+    auto <- c(min = FALSE, max = FALSE)
+    type_id <- paste0(prefix, "type_", rid)
+    observeEvent(
+      input[[type_id]],
+      {
+        is_pct <- isTRUE(input[[type_id]] == "Percentage")
+        for (b in names(defaults)) {
+          id <- paste0(prefix, b, "_", rid)
+          cur <- input[[id]]
+          cur <- if (is.null(cur)) "" else trimws(cur)
+          if (is_pct && !nzchar(cur)) {
+            updateTextInput(session, id, value = defaults[[b]])
+            auto[[b]] <<- TRUE
+          } else if (!is_pct && auto[[b]]) {
+            if (cur == defaults[[b]]) {
+              updateTextInput(session, id, value = "")
+            }
+            auto[[b]] <<- FALSE
+          }
+        }
+      },
+      ignoreInit = TRUE
+    )
+  }
 
-  vis_css <- function(s, prefix) {
+  # ── Single-row tab: GRIM / GRIMMER / Bounds (gb_ namespace) ───────────────
+  gb_slots <- reactiveVal(1:3)
+
+  gb_vis_css <- function(active) {
     rules <- vapply(
       seq_len(MAX_ROWS),
       function(i) {
-        display <- if (i %in% s) "grid" else "none"
-        sprintf("#%s_slot_%d{display:%s!important}", prefix, i, display)
+        display <- if (i %in% active) "grid" else "none"
+        sprintf("#gb_slot_%d{display:%s!important}", i, display)
       },
       character(1)
     )
     tags$style(paste(rules, collapse = ""))
   }
 
-  output$combined_vis <- renderUI(vis_css(slots(), "cb"))
+  output$gb_vis <- renderUI(gb_vis_css(gb_slots()))
 
-  output$combined_empty <- renderUI({
-    if (length(slots()) == 0) {
+  output$gb_empty <- renderUI({
+    if (length(gb_slots()) == 0) {
       p(
         class = "text-muted fst-italic small mt-2 mb-0",
         "No rows. Click \"+ Add row\" to add one."
@@ -1014,131 +1857,132 @@ server <- function(input, output, session) {
     }
   })
 
-  observeEvent(input$combined_add, {
-    s <- slots()
-    ns <- next_free(s)
-    if (!is.null(ns)) slots(c(s, ns))
+  # Slots are kept sorted so that the CSV lists rows in on-screen (DOM) order.
+  observeEvent(input$gb_add, {
+    s <- gb_slots()
+    ns <- next_free(s, MAX_ROWS)
+    if (!is.null(ns)) gb_slots(sort(c(s, ns)))
   })
 
-  # Pre-register outputs and observers for every possible slot
   for (i in seq_len(MAX_ROWS)) {
     local({
       ii <- i
 
       observeEvent(
-        input[[paste0("cb_rm_", ii)]],
+        input[[paste0("gb_rm_", ii)]],
         {
-          current <- slots()
+          current <- gb_slots()
           if (ii %in% current) {
-            updateTextInput(session, paste0("cb_x_", ii), value = "")
-            updateTextInput(session, paste0("cb_sd_", ii), value = "")
-            updateTextInput(session, paste0("cb_n_", ii), value = "")
-            updateNumericInput(session, paste0("cb_items_", ii), value = 1)
-            updateTextInput(session, paste0("cb_min_", ii), value = "")
-            updateTextInput(session, paste0("cb_max_", ii), value = "")
+            updateTextInput(session, paste0("gb_var_", ii), value = "")
+            updateCheckboxInput(session, paste0("gb_int_", ii), value = FALSE)
+            updateTextInput(session, paste0("gb_x_", ii), value = "")
+            updateTextInput(session, paste0("gb_sd_", ii), value = "")
+            updateTextInput(session, paste0("gb_n_", ii), value = "")
+            updateNumericInput(session, paste0("gb_items_", ii), value = 1)
+            updateTextInput(session, paste0("gb_min_", ii), value = "")
+            updateTextInput(session, paste0("gb_max_", ii), value = "")
             updateSelectInput(
               session,
-              paste0("cb_type_", ii),
+              paste0("gb_type_", ii),
               selected = "Mean"
             )
-            slots(setdiff(current, ii))
+            gb_slots(setdiff(current, ii))
           }
         },
         ignoreNULL = TRUE,
         ignoreInit = TRUE
       )
 
-      observeEvent(
-        input[[paste0("cb_type_", ii)]],
-        {
-          if (isTRUE(input[[paste0("cb_type_", ii)]] == "Percentage")) {
-            cur_min <- input[[paste0("cb_min_", ii)]]
-            cur_max <- input[[paste0("cb_max_", ii)]]
-            if (is.null(cur_min) || !nzchar(trimws(cur_min))) {
-              updateTextInput(session, paste0("cb_min_", ii), value = "0")
-            }
-            if (is.null(cur_max) || !nzchar(trimws(cur_max))) {
-              updateTextInput(session, paste0("cb_max_", ii), value = "100")
-            }
-          }
-        },
-        ignoreInit = TRUE
-      )
+      sync_type_bounds("gb_", ii)
 
-      output[[paste0("cb_badge_", ii)]] <- renderUI({
-        x_str <- input[[paste0("cb_x_", ii)]]
-        sd_str <- input[[paste0("cb_sd_", ii)]]
-        n_str <- input[[paste0("cb_n_", ii)]]
-        items <- input[[paste0("cb_items_", ii)]]
-        type <- input[[paste0("cb_type_", ii)]]
-        min_str <- input[[paste0("cb_min_", ii)]]
-        max_str <- input[[paste0("cb_max_", ii)]]
-        res <- evaluate_row(x_str, sd_str, n_str, items, type, min_str, max_str)
+      output[[paste0("gb_badge_", ii)]] <- renderUI({
+        x_str <- input[[paste0("gb_x_", ii)]]
+        sd_str <- input[[paste0("gb_sd_", ii)]]
+        n_str <- input[[paste0("gb_n_", ii)]]
+        items <- input[[paste0("gb_items_", ii)]]
+        type <- input[[paste0("gb_type_", ii)]]
+        min_str <- input[[paste0("gb_min_", ii)]]
+        max_str <- input[[paste0("gb_max_", ii)]]
+        integer <- isTRUE(input[[paste0("gb_int_", ii)]])
+        res <- evaluate_row(
+          x_str,
+          sd_str,
+          n_str,
+          items,
+          type,
+          min_str,
+          max_str,
+          integer
+        )
         if (!is.null(res$err)) {
           return(error_ui(res$err))
         }
-        uninf <- if (!is.null(x_str) && nzchar(trimws(x_str))) {
-          grim_uninformative(
-            x_str,
-            n_str,
-            items,
-            percent = isTRUE(type == "Percentage")
-          )
-        } else {
-          FALSE
-        }
-        dx <- if (!is.null(x_str) && nzchar(trimws(x_str))) {
-          decimal_places_scalar(gsub(",", ".", trimws(x_str)))
-        } else {
-          NULL
-        }
-        result_ui(res$ok, res$reasons, uninformative = uninf, digits = dx)
+        result_ui(
+          res$ok,
+          res$reasons,
+          uninformative = isTRUE(res$uninformative),
+          digits = res$grim_digits,
+          notes = res$notes
+        )
       })
     })
   }
 
-  output$combined_summary <- renderUI({
-    s <- slots()
+  output$gb_summary <- renderUI({
+    s <- gb_slots()
     results <- vapply(
       s,
       function(i) {
-        res <- evaluate_row(
-          input[[paste0("cb_x_", i)]],
-          input[[paste0("cb_sd_", i)]],
-          input[[paste0("cb_n_", i)]],
-          input[[paste0("cb_items_", i)]],
-          input[[paste0("cb_type_", i)]],
-          input[[paste0("cb_min_", i)]],
-          input[[paste0("cb_max_", i)]]
-        )
-        res$ok
+        evaluate_row(
+          input[[paste0("gb_x_", i)]],
+          input[[paste0("gb_sd_", i)]],
+          input[[paste0("gb_n_", i)]],
+          input[[paste0("gb_items_", i)]],
+          input[[paste0("gb_type_", i)]],
+          input[[paste0("gb_min_", i)]],
+          input[[paste0("gb_max_", i)]],
+          isTRUE(input[[paste0("gb_int_", i)]])
+        )$ok
       },
       logical(1)
     )
     summary_bar(results)
   })
 
-  output$download_csv <- downloadHandler(
-    filename = function() paste0("grim-grimmer-", Sys.time(), ".csv"),
+  output$gb_download <- downloadHandler(
+    filename = function() {
+      paste0("grim-grimmer-", format(Sys.time(), "%Y%m%d-%H%M%S"), ".csv")
+    },
     content = function(file) {
-      s <- slots()
+      s <- gb_slots()
+      row_counter <- 0L
       rows <- lapply(s, function(i) {
-        x_str <- input[[paste0("cb_x_", i)]]
-        sd_str <- input[[paste0("cb_sd_", i)]]
-        n_str <- input[[paste0("cb_n_", i)]]
-        items <- input[[paste0("cb_items_", i)]]
-        type <- input[[paste0("cb_type_", i)]]
-        min_str <- input[[paste0("cb_min_", i)]]
-        max_str <- input[[paste0("cb_max_", i)]]
+        x_str <- input[[paste0("gb_x_", i)]]
+        sd_str <- input[[paste0("gb_sd_", i)]]
+        n_str <- input[[paste0("gb_n_", i)]]
+        items <- input[[paste0("gb_items_", i)]]
+        type <- input[[paste0("gb_type_", i)]]
+        min_str <- input[[paste0("gb_min_", i)]]
+        max_str <- input[[paste0("gb_max_", i)]]
+        variable <- input[[paste0("gb_var_", i)]]
+        integer <- isTRUE(input[[paste0("gb_int_", i)]])
         if (is.null(x_str) || !nzchar(trimws(x_str))) {
           return(NULL)
+        }
+        # When the Variable cell is blank, fall back to an incremental value
+        # numbered per emitted row.
+        row_counter <<- row_counter + 1L
+        var_val <- if (!is.null(variable) && nzchar(trimws(variable))) {
+          trimws(variable)
+        } else {
+          as.character(row_counter)
         }
         sd_given <- !is.null(sd_str) && nzchar(trimws(sd_str))
         min_given <- !is.null(min_str) && nzchar(trimws(min_str))
         max_given <- !is.null(max_str) && nzchar(trimws(max_str))
         # fmt: skip
         res <- evaluate_row(
-          x_str, sd_str, n_str, items, type, min_str, max_str
+          x_str, sd_str, n_str, items, type, min_str, max_str, integer
         )
         test_label <- if (length(res$tests_run) == 0) {
           ""
@@ -1152,21 +1996,20 @@ server <- function(input, output, session) {
         } else {
           ""
         }
-        uninf <- grim_uninformative(
-          x_str,
-          n_str,
-          items,
-          percent = isTRUE(type == "Percentage")
-        )
-        notes <- if (uninf && !sd_given) {
-          paste(
-            "Uninformative GRIM: every possible mean is achievable for this N",
-            "and item count."
+        note_parts <- res$notes
+        if (isTRUE(res$uninformative)) {
+          note_parts <- c(
+            note_parts,
+            paste(
+              "Uninformative GRIM: every possible mean is achievable for this N",
+              "and item count."
+            )
           )
-        } else {
-          ""
         }
+        notes <- paste(note_parts, collapse = "; ")
         data.frame(
+          label = var_val,
+          integer_data = integer,
           type = if (is.null(type)) "Mean" else type,
           mean = trimws(x_str),
           sd = if (sd_given) trimws(sd_str) else "",
@@ -1184,6 +2027,8 @@ server <- function(input, output, session) {
       rows <- Filter(Negate(is.null), rows)
       if (length(rows) == 0) {
         df <- data.frame(
+          label = character(),
+          integer_data = logical(),
           type = character(),
           mean = character(),
           sd = character(),
@@ -1194,6 +2039,350 @@ server <- function(input, output, session) {
           test = character(),
           consistent = logical(),
           inconsistency = character(),
+          notes = character(),
+          stringsAsFactors = FALSE
+        )
+      } else {
+        df <- do.call(rbind, rows)
+      }
+      write.csv(df, file, row.names = FALSE)
+    }
+  )
+
+  # ── Paired tab: GRIM / GRIMMER / Bounds / t-test p value (cb_ namespace) ──
+  pairs <- reactiveVal(1:2)
+
+  vis_css <- function(active) {
+    rules <- vapply(
+      seq_len(MAX_PAIRS),
+      function(p) {
+        display <- if (p %in% active) "grid" else "none"
+        sprintf(
+          "#cb_slot_%da{display:%s!important}#cb_slot_%db{display:%s!important}",
+          p,
+          display,
+          p,
+          display
+        )
+      },
+      character(1)
+    )
+    tags$style(paste(rules, collapse = ""))
+  }
+
+  output$combined_vis <- renderUI(vis_css(pairs()))
+
+  output$combined_empty <- renderUI({
+    if (length(pairs()) == 0) {
+      p(
+        class = "text-muted fst-italic small mt-2 mb-0",
+        "No variables. Click \"+ Add variable\" to add one."
+      )
+    }
+  })
+
+  observeEvent(input$combined_add, {
+    s <- pairs()
+    ns <- next_free(s, MAX_PAIRS)
+    if (!is.null(ns)) pairs(sort(c(s, ns)))
+  })
+
+  # Read the GRIM/GRIMMER/Bounds inputs for one row id stem (e.g. "1a").
+  read_row <- function(rid) {
+    list(
+      x = input[[paste0("cb_x_", rid)]],
+      sd = input[[paste0("cb_sd_", rid)]],
+      n = input[[paste0("cb_n_", rid)]],
+      items = input[[paste0("cb_items_", rid)]],
+      type = input[[paste0("cb_type_", rid)]],
+      min = input[[paste0("cb_min_", rid)]],
+      max = input[[paste0("cb_max_", rid)]]
+    )
+  }
+
+  eval_rid <- function(rid) {
+    r <- read_row(rid)
+    # The Integer-data flag is per-pair; strip the trailing side letter to get
+    # the pair index (e.g. "12a" -> "12").
+    p <- substr(rid, 1, nchar(rid) - 1)
+    integer <- isTRUE(input[[paste0("cb_int_", p)]])
+    evaluate_row(r$x, r$sd, r$n, r$items, r$type, r$min, r$max, integer)
+  }
+
+  eval_pair_ttest <- function(p) {
+    rid_a <- paste0(p, "a")
+    rid_b <- paste0(p, "b")
+    evaluate_pair_ttest(
+      input[[paste0("cb_x_", rid_a)]],
+      input[[paste0("cb_sd_", rid_a)]],
+      input[[paste0("cb_n_", rid_a)]],
+      input[[paste0("cb_x_", rid_b)]],
+      input[[paste0("cb_sd_", rid_b)]],
+      input[[paste0("cb_n_", rid_b)]],
+      input[[paste0("cb_p_", p)]],
+      input[[paste0("cb_pop_", p)]]
+    )
+  }
+
+  # Pre-register outputs and observers for every possible pair / row
+  for (p in seq_len(MAX_PAIRS)) {
+    local({
+      pp <- p
+
+      # Per-row machinery (both sides of the pair)
+      for (side in c("a", "b")) {
+        local({
+          rid <- paste0(pp, side)
+
+          sync_type_bounds("cb_", rid)
+
+          output[[paste0("cb_badge_", rid)]] <- renderUI({
+            r <- read_row(rid)
+            integer <- isTRUE(input[[paste0("cb_int_", pp)]])
+            res <- evaluate_row(
+              r$x,
+              r$sd,
+              r$n,
+              r$items,
+              r$type,
+              r$min,
+              r$max,
+              integer
+            )
+            if (!is.null(res$err)) {
+              return(error_ui(res$err))
+            }
+            result_ui(
+              res$ok,
+              res$reasons,
+              uninformative = isTRUE(res$uninformative),
+              digits = res$grim_digits,
+              notes = res$notes
+            )
+          })
+        })
+      }
+
+      # Per-pair t-test recalculation result
+      output[[paste0("cb_ttest_", pp)]] <- renderUI({
+        ttest_result_ui(eval_pair_ttest(pp))
+      })
+
+      # Per-pair removal (clears both rows + Variable + Reported p)
+      observeEvent(
+        input[[paste0("cb_rm_", pp)]],
+        {
+          current <- pairs()
+          if (pp %in% current) {
+            updateTextInput(session, paste0("cb_var_", pp), value = "")
+            updateCheckboxInput(session, paste0("cb_int_", pp), value = FALSE)
+            updateTextInput(session, paste0("cb_p_", pp), value = "")
+            updateSelectInput(
+              session,
+              paste0("cb_pop_", pp),
+              selected = "equals"
+            )
+            for (side in c("a", "b")) {
+              rid <- paste0(pp, side)
+              updateTextInput(session, paste0("cb_grp_", rid), value = "")
+              updateTextInput(session, paste0("cb_x_", rid), value = "")
+              updateTextInput(session, paste0("cb_sd_", rid), value = "")
+              updateTextInput(session, paste0("cb_n_", rid), value = "")
+              updateNumericInput(session, paste0("cb_items_", rid), value = 1)
+              updateTextInput(session, paste0("cb_min_", rid), value = "")
+              updateTextInput(session, paste0("cb_max_", rid), value = "")
+              updateSelectInput(
+                session,
+                paste0("cb_type_", rid),
+                selected = "Mean"
+              )
+            }
+            pairs(setdiff(current, pp))
+          }
+        },
+        ignoreNULL = TRUE,
+        ignoreInit = TRUE
+      )
+    })
+  }
+
+  output$combined_summary <- renderUI({
+    s <- pairs()
+    rids <- unlist(lapply(s, function(p) paste0(p, c("a", "b"))))
+    results <- vapply(rids, function(rid) eval_rid(rid)$ok, logical(1))
+    summary_bar(results)
+  })
+
+  output$ttest_summary <- renderUI({
+    s <- pairs()
+    tts <- lapply(s, eval_pair_ttest)
+    ttest_summary_bar(tts)
+  })
+
+  output$download_csv <- downloadHandler(
+    filename = function() {
+      paste0(
+        "grim-grimmer-ttest-",
+        format(Sys.time(), "%Y%m%d-%H%M%S"),
+        ".csv"
+      )
+    },
+    content = function(file) {
+      s <- pairs()
+      pair_counter <- 0L
+      rows <- lapply(s, function(p) {
+        tt <- eval_pair_ttest(p)
+        variable <- input[[paste0("cb_var_", p)]]
+        integer <- isTRUE(input[[paste0("cb_int_", p)]])
+        p_str <- input[[paste0("cb_p_", p)]]
+        pop <- input[[paste0("cb_pop_", p)]]
+
+        # A pair contributes rows only if at least one side has a mean. When the
+        # Variable / Group cells are left blank, fall back to incremental values:
+        # Variable is numbered per emitted pair, Group 1/2 within the pair.
+        has_data <- function(side) {
+          xv <- input[[paste0("cb_x_", p, side)]]
+          !is.null(xv) && nzchar(trimws(xv))
+        }
+        if (!has_data("a") && !has_data("b")) {
+          return(NULL)
+        }
+        pair_counter <<- pair_counter + 1L
+        # The pair-level fields (label, reported p, t-test result) go on the
+        # pair's first emitted row, which is the second group's row if the
+        # first group has no mean.
+        first_side <- if (has_data("a")) "a" else "b"
+        var_val <- if (!is.null(variable) && nzchar(trimws(variable))) {
+          trimws(variable)
+        } else {
+          as.character(pair_counter)
+        }
+
+        per_side <- lapply(c("a", "b"), function(side) {
+          rid <- paste0(p, side)
+          r <- read_row(rid)
+          group <- input[[paste0("cb_grp_", rid)]]
+          if (is.null(r$x) || !nzchar(trimws(r$x))) {
+            return(NULL)
+          }
+          group_val <- if (!is.null(group) && nzchar(trimws(group))) {
+            trimws(group)
+          } else if (side == "a") {
+            "1"
+          } else {
+            "2"
+          }
+          sd_given <- !is.null(r$sd) && nzchar(trimws(r$sd))
+          min_given <- !is.null(r$min) && nzchar(trimws(r$min))
+          max_given <- !is.null(r$max) && nzchar(trimws(r$max))
+          # fmt: skip
+          res <- evaluate_row(
+            r$x, r$sd, r$n, r$items, r$type, r$min, r$max, integer
+          )
+          test_label <- if (length(res$tests_run) == 0) {
+            ""
+          } else {
+            paste(res$tests_run, collapse = "+")
+          }
+          inconsistency <- if (!is.null(res$err)) {
+            res$err
+          } else if (!is.na(res$ok) && !res$ok) {
+            paste(res$reasons, collapse = "; ")
+          } else {
+            ""
+          }
+          note_parts <- res$notes
+          if (isTRUE(res$uninformative)) {
+            note_parts <- c(
+              note_parts,
+              paste(
+                "Uninformative GRIM: every possible mean is achievable for this N",
+                "and item count."
+              )
+            )
+          }
+          notes <- paste(note_parts, collapse = "; ")
+          # t-test fields only on the first row of the pair
+          is_first <- side == first_side
+          tt_ok <- identical(tt$status, "ok")
+          data.frame(
+            label = if (is_first) var_val else "",
+            integer_data = integer,
+            group = group_val,
+            type = if (is.null(r$type)) "Mean" else r$type,
+            mean = trimws(r$x),
+            sd = if (sd_given) trimws(r$sd) else "",
+            n = if (!is.null(r$n)) trimws(r$n) else "",
+            items = if (!is.null(r$items) && !is.na(r$items)) {
+              r$items
+            } else {
+              NA_real_
+            },
+            min = if (min_given) trimws(r$min) else "",
+            max = if (max_given) trimws(r$max) else "",
+            test = test_label,
+            consistent = res$ok,
+            inconsistency = inconsistency,
+            p_operator = if (
+              is_first && !is.null(p_str) && nzchar(trimws(p_str))
+            ) {
+              op_symbol(pop)
+            } else {
+              ""
+            },
+            reported_p = if (
+              is_first && !is.null(p_str) && nzchar(trimws(p_str))
+            ) {
+              trimws(p_str)
+            } else {
+              ""
+            },
+            recalc_p_min = if (is_first && tt_ok) tt$min_p else NA_real_,
+            recalc_p_max = if (is_first && tt_ok) tt$max_p else NA_real_,
+            p_reproduces = if (is_first && tt_ok && isTRUE(tt$p_given)) {
+              tt$inbounds
+            } else {
+              NA
+            },
+            p_note = if (is_first && identical(tt$status, "error")) {
+              tt$msg
+            } else if (is_first && tt_ok && isTRUE(tt$mixed_digits)) {
+              MIXED_DIGITS_NOTE
+            } else {
+              ""
+            },
+            notes = notes,
+            stringsAsFactors = FALSE
+          )
+        })
+        per_side <- Filter(Negate(is.null), per_side)
+        if (length(per_side) == 0) {
+          return(NULL)
+        }
+        do.call(rbind, per_side)
+      })
+      rows <- Filter(Negate(is.null), rows)
+      if (length(rows) == 0) {
+        df <- data.frame(
+          label = character(),
+          integer_data = logical(),
+          group = character(),
+          type = character(),
+          mean = character(),
+          sd = character(),
+          n = character(),
+          items = numeric(),
+          min = character(),
+          max = character(),
+          test = character(),
+          consistent = logical(),
+          inconsistency = character(),
+          p_operator = character(),
+          reported_p = character(),
+          recalc_p_min = numeric(),
+          recalc_p_max = numeric(),
+          p_reproduces = logical(),
+          p_note = character(),
           notes = character(),
           stringsAsFactors = FALSE
         )
