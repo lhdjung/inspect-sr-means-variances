@@ -1,5 +1,6 @@
 # Self-check for app.R. Run from the project root with: Rscript tests.R
-# Stops with an error at the first failing assertion.
+# Stops with an error at the first failing assertion. Takes about a minute.
+# Run it before every deploy.
 
 app <- suppressMessages(source("app.R")$value)
 
@@ -13,9 +14,26 @@ evaluate <- function(
   max = "",
   integer = TRUE
 ) {
-  if (!integer) type <- "Any mean"
+  if (!integer) {
+    type <- "Any mean"
+  }
   evaluate_row(x, sd, n, items, type, min, max)
 }
+
+# Prints each part as it runs and how long it took to pass.
+section_start <- NULL
+section <- function(name = NULL) {
+  if (!is.null(section_start)) {
+    elapsed <- (proc.time() - section_start)[["elapsed"]]
+    cat(sprintf("passed (%.1f s)\n", elapsed))
+  }
+  if (!is.null(name)) {
+    cat(name, "... ")
+  }
+  section_start <<- proc.time()
+}
+
+section("Known GRIM/GRIMMER verdicts")
 
 # GRIM / GRIMMER actually run and give known verdicts ----------------------
 # (guards against scrutiny API changes silently disabling a test)
@@ -46,6 +64,8 @@ r <- evaluate("5.20", "", "30")
 stopifnot(is.na(r$ok), grepl("Internal error: boom", r$err))
 grim <- real_grim
 rm(real_grim)
+
+section("No false positives on 2,000 simulated data sets")
 
 # No false positives on real data ------------------------------------------
 # Summary statistics of genuine integer data inside the bounds must never be
@@ -78,7 +98,235 @@ for (i in 1:2000) {
   }
 }
 
+section("GRIM against brute force (4,000 cases)")
+
+# Brute-force oracles --------------------------------------------------------
+# Hand-picked expected values come from the same reasoning as the code, so they
+# can share its mistakes: the percentage bug of a0a4a05 (dp + 4 instead of
+# dp + 2) went unnoticed for five months. The checks below compare the app with
+# answers computed here from first principles, without scrutiny.
+
+decimals <- function(s) {
+  if (grepl(".", s, fixed = TRUE)) nchar(sub(".*\\.", "", s)) else 0L
+}
+# "45.5" -> 455: the reported value in units of its last decimal place
+units <- function(s) as.numeric(sub(".", "", s, fixed = TRUE))
+
+# Report `v` at `d` decimal places, rounding a tie up or down as authors may.
+fmt <- function(v, d, up = runif(1) < .5) {
+  u <- v * 10^d
+  u <- if (up) floor(u + 0.5 + 1e-9) else ceiling(u - 0.5 - 1e-9)
+  formatC(u / 10^d + 0, format = "f", digits = d) # + 0 turns -0 into 0
+}
+
+# A mean of N whole numbers is K / N, a percentage 100 * K / N. Reported as r
+# units of 1 / M, it is possible if some K lands within half a unit of r
+# (ties may go either way). Integer arithmetic, so no floating-point error.
+grim_hit <- function(r, N, M) {
+  K <- floor(r * N / M)
+  2 * abs(K * M - r * N) <= N | 2 * abs((K + 1) * M - r * N) <= N
+}
+
+set.seed(7)
+grim_cases <- lapply(1:4000, function(i) {
+  pct <- runif(1) < .5
+  d <- sample(0:3, 1)
+  x <- if (pct) runif(1, 0, 100) else runif(1, -5, 20)
+  list(
+    pct = pct,
+    x = formatC(round(x, d), format = "f", digits = d),
+    n = sample(c(2:60, sample(61:20000, 1)), 1),
+    items = if (pct) 1 else sample(c(1, 1, 2, 3, 7), 1)
+  )
+})
+grim_cases <- c(
+  grim_cases,
+  lapply(c("0", "100", "0.0", "100.00", "50"), function(x) {
+    list(pct = TRUE, x = x, n = 7, items = 1)
+  })
+)
+
+# Returns the first case where the app disagrees with brute force, or NULL.
+grim_mismatch <- function(cases) {
+  for (k in cases) {
+    type <- if (k$pct) "Percentage" else "Whole-number mean"
+    r <- evaluate(k$x, "", as.character(k$n), k$items, type = type)
+    N <- k$n * k$items
+    M <- (if (k$pct) 100 else 1) * 10^decimals(k$x)
+    # Uninformative: every reportable value in one period is possible.
+    uninformative <- all(grim_hit(0:(M - 1), N, M))
+    if (
+      !identical(r$tests_run, "GRIM") ||
+        !identical(r$ok, grim_hit(units(k$x), N, M)) ||
+        !identical(r$uninformative, uninformative) ||
+        r$grim_digits != log10(M)
+    ) {
+      return(c(k, list(app_ok = r$ok, app_uninformative = r$uninformative)))
+    }
+  }
+  NULL
+}
+
+bad <- grim_mismatch(grim_cases)
+if (!is.null(bad)) {
+  stop("GRIM disagrees with brute force: ", deparse(bad))
+}
+
+section("Brute-force check catches 3 reinstated GRIM bugs")
+
+# The oracle must have teeth: reinstate known bugs and expect it to object.
+fixed_safe_grim <- safe_grim
+mutants <- list(
+  historical_dp_plus_4 = function(x_str, n_str, items, percent = FALSE) {
+    dx <- count_decimal_places(x_str) + if (percent) 2L else 0L
+    fixed_safe_grim(x_str, n_str, items, percent) &
+      grim(
+        parse_number(x_str),
+        as.integer(n_str),
+        dx,
+        as.integer(items),
+        percent
+      )
+  },
+  percent_ignored = function(x_str, n_str, items, percent = FALSE) {
+    fixed_safe_grim(x_str, n_str, items, percent = FALSE)
+  },
+  items_ignored = function(x_str, n_str, items, percent = FALSE) {
+    fixed_safe_grim(x_str, n_str, 1, percent)
+  }
+)
+for (name in names(mutants)) {
+  safe_grim <- mutants[[name]]
+  if (is.null(grim_mismatch(grim_cases))) {
+    safe_grim <- fixed_safe_grim
+    stop("GRIM oracle failed to catch the mutant ", name)
+  }
+}
+safe_grim <- fixed_safe_grim
+rm(fixed_safe_grim, mutants)
+
+section("No false positives on every small data set (n = 2-7)")
+
+# Every data set of n whole numbers on a small scale, for the small n where
+# GRIM and GRIMMER are most powerful, rounded every way: none may be flagged.
+for (scale in list(1:5, 0:3, -2:2)) {
+  m <- length(scale)
+  for (n in 2:7) {
+    # Columns are all nondecreasing index vectors, i.e. all multisets.
+    idx <- combn(m + n - 1, n) - 0:(n - 1)
+    for (j in seq_len(ncol(idx))) {
+      data <- scale[idx[, j]]
+      for (d in 1:2) {
+        for (up in c(TRUE, FALSE)) {
+          x <- fmt(mean(data), d, up)
+          sd_str <- fmt(sd(data), d, !up)
+          r <- evaluate(
+            x,
+            sd_str,
+            as.character(n),
+            type = "Whole-number mean",
+            min = as.character(min(scale)),
+            max = as.character(max(scale))
+          )
+          if (!isTRUE(r$ok)) {
+            stop(
+              "False positive: ",
+              paste(c(r$reasons, r$err), collapse = "; "),
+              " for M = ",
+              x,
+              ", SD = ",
+              sd_str,
+              " from data ",
+              paste(data, collapse = ",")
+            )
+          }
+        }
+      }
+    }
+  }
+}
+
+section("No false positives on 1,500 percentage and \"Any mean\" data sets")
+
+# Percentages from genuine yes/no counts, with and without an SD in
+# percentage points (Min 0 and Max 100, as the UI fills in), and continuous
+# "Any mean" data, half the time piled up at the bounds where the Bhatia–Davis
+# bound is reached exactly.
+set.seed(11)
+for (i in 1:1500) {
+  n <- sample(c(2:100, sample(101:5000, 1)), 1)
+  if (runif(1) < .5) {
+    type <- "Percentage"
+    lo <- 0
+    hi <- 100
+    data <- 100 * rbinom(n, 1, runif(1))
+    x <- fmt(mean(data), sample(0:2, 1))
+  } else {
+    type <- "Any mean"
+    lo <- sample(c(0, 1, -3), 1)
+    hi <- lo + sample(1:10, 1)
+    data <- if (runif(1) < .5) {
+      sample(c(lo, hi), n, TRUE)
+    } else {
+      runif(n, lo, hi)
+    }
+    x <- fmt(mean(data), sample(1:2, 1))
+  }
+  sd_str <- if (runif(1) < .5) fmt(sd(data), sample(1:2, 1)) else ""
+  r <- evaluate(
+    x,
+    sd_str,
+    as.character(n),
+    1,
+    type,
+    as.character(lo),
+    as.character(hi)
+  )
+  if (!isTRUE(r$ok)) {
+    stop(
+      "False positive (",
+      type,
+      "): ",
+      paste(c(r$reasons, r$err), collapse = "; "),
+      " for M = ",
+      x,
+      ", SD = ",
+      sd_str,
+      ", N = ",
+      n
+    )
+  }
+}
+
+section("Bounds")
+
 # Bounds ---------------------------------------------------------------------
+
+# The bounds are tight. Half 1s and half 5s give mean 3 and the largest
+# possible SD, so that SD passes and one unit more fails.
+for (n in c(2, 4, 10, 50)) {
+  sd_max <- round(2 * sqrt(n / (n - 1)), 2)
+  sd_ok <- function(s) {
+    evaluate(
+      "3.00",
+      formatC(s, format = "f", digits = 2),
+      as.character(n),
+      min = "1",
+      max = "5",
+      integer = FALSE
+    )$ok
+  }
+  stopifnot(isTRUE(sd_ok(sd_max)), isFALSE(sd_ok(sd_max + 0.01)))
+}
+mean_ok <- function(x) {
+  evaluate(x, "", "20", min = "1", max = "5", integer = FALSE)$ok
+}
+stopifnot(
+  isTRUE(mean_ok("5.00")),
+  isFALSE(mean_ok("5.01")),
+  isTRUE(mean_ok("1.00")),
+  isFALSE(mean_ok("0.99"))
+)
 
 # One 1 among 24 zeros: mean 0.04 -> "0.0", SD 0.2. Possible.
 stopifnot(isTRUE(evaluate("0.0", "0.2", "25", min = "0", max = "1")$ok))
@@ -106,7 +354,9 @@ stopifnot(
   identical(r$notes, "Bounds only; GRIM/GRIMMER not run for \"Any mean\"")
 )
 # The default type runs no GRIM, even on an impossible mean.
-stopifnot(isTRUE(is.na(evaluate_row("5.21", "", "30", 1, "Any mean", "", "")$ok)))
+stopifnot(isTRUE(is.na(
+  evaluate_row("5.21", "", "30", 1, "Any mean", "", "")$ok
+)))
 
 # Without N, skipped tests are named instead of passing silently.
 r <- evaluate("3.0", "2.5", "", min = "1", max = "5")
@@ -124,7 +374,10 @@ stopifnot(
   identical(evaluate("", "1.2", "30")$notes, "Awaiting mean"),
   identical(
     evaluate("3.0", "2.5", "", min = "1", max = "5", integer = FALSE)$notes,
-    c("Mean bounds only; GRIM/GRIMMER not run for \"Any mean\"", "SD bound needs N")
+    c(
+      "Mean bounds only; GRIM/GRIMMER not run for \"Any mean\"",
+      "SD bound needs N"
+    )
   )
 )
 
@@ -132,7 +385,10 @@ stopifnot(
 r <- evaluate("7.2", "9.9", "20", max = "5")
 stopifnot(
   identical(r$reasons, "Mean out of bounds"),
-  identical(r$notes, "Only Max given; add Min for a more informative bounds check")
+  identical(
+    r$notes,
+    "Only Max given; add Min for a more informative bounds check"
+  )
 )
 r <- evaluate("3.0", "", "", min = "1")
 stopifnot(
@@ -155,8 +411,11 @@ stopifnot(
     evaluate("3.0", "0.5", "20", min = "3", max = "3")$reasons,
     "SD exceeds Bhatia–Davis bound"
   ),
-  "Mean out of bounds" %in% evaluate("3.4", "", "20", min = "3", max = "3")$reasons
+  "Mean out of bounds" %in%
+    evaluate("3.4", "", "20", min = "3", max = "3")$reasons
 )
+
+section("Input validation")
 
 # Input validation -----------------------------------------------------------
 
@@ -193,6 +452,8 @@ stopifnot(
   identical(validation_error("5.2", "", "20", max = "7,0"), comma_msg("Max")),
   is.null(validation_error("-.5", "", "30"))
 )
+
+section("t-test recalculation")
 
 # t-test recalculation ---------------------------------------------------------
 
@@ -266,6 +527,33 @@ stopifnot(
   run_t_test("", "", "", "", "", "")$status == "blank"
 )
 
+section("t-test p values from 60 simulated data sets")
+
+# p values recalculated from genuine data, by Student's or Welch's test,
+# must be reproduced from the rounded summary statistics.
+set.seed(3)
+for (i in 1:60) {
+  n1 <- sample(5:80, 1)
+  n2 <- sample(5:80, 1)
+  g1 <- sample(1:7, n1, TRUE)
+  g2 <- sample(1:7, n2, TRUE, prob = c(1, 1, 2, 3, 3, 2, 1))
+  p <- t.test(g1, g2, var.equal = runif(1) < .5)$p.value
+  dm <- sample(1:2, 1)
+  ds <- sample(1:2, 1)
+  args <- list(
+    fmt(mean(g1), dm),
+    fmt(sd(g1), ds),
+    as.character(n1),
+    fmt(mean(g2), dm),
+    fmt(sd(g2), ds),
+    as.character(n2),
+    p = fmt(p, sample(2:3, 1))
+  )
+  if (!isTRUE(do.call(run_t_test, args)$inbounds)) {
+    stop("Genuine p not reproduced: ", deparse(args))
+  }
+}
+
 stopifnot(
   format_p_value(0.0004) == "<0.001",
   format_p_value(0.0006) == "0.001",
@@ -274,6 +562,8 @@ stopifnot(
   format_p_value(1) == "1.000",
   format_p_value(0) == "<0.001"
 )
+
+section("Server: rows, percentage type, CSV download")
 
 # Server: row order, type/bounds sync, CSV --------------------------------------
 
@@ -299,6 +589,23 @@ shiny::testServer(app, {
     csv$consistent == "TRUE",
     grepl("Uninformative GRIM", csv$notes)
   )
+
+  # The Percentage type reaches the percentage GRIM through the UI.
+  session$setInputs(
+    gb_type_1 = "Percentage",
+    gb_x_1 = "45.4",
+    gb_n_1 = "22",
+    gb_min_1 = "0",
+    gb_max_1 = "100"
+  )
+  csv <- read.csv(output$gb_download, colClasses = "character")
+  stopifnot(
+    csv$consistent == "FALSE",
+    csv$inconsistency == "Percentage fails GRIM"
+  )
+  session$setInputs(gb_x_1 = "45.5")
+  csv <- read.csv(output$gb_download, colClasses = "character")
+  stopifnot(csv$consistent == "TRUE", csv$test == "GRIM+Bounds")
 
   for (rid in c("1a", "1b")) {
     do.call(
@@ -337,4 +644,5 @@ shiny::testServer(app, {
   )
 })
 
+section()
 cat("All checks passed.\n")

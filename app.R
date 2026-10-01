@@ -3,7 +3,7 @@ library(bslib)
 library(scrutiny)
 library(recalc)
 
-# # Deploy like this:
+# # Deploy like this, after `Rscript tests.R` prints "All checks passed.":
 # rsconnect::deployApp(
 #   appName = "inspect-sr-means-variances",
 #   account = "errors"
