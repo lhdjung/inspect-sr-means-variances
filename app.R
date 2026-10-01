@@ -508,7 +508,8 @@ evaluate_row_unsafe <- function(
 # - "incomplete": some but not all of M/SD/N for both groups present
 # - "error":      an explicit problem (with $msg)
 # - "ok":         recalculated (with $min_p, $max_p, $p_given, $p_reported,
-#                 $inbounds, $p_digits, $mixed_digits)
+#                 $inbounds, $p_digits, $mixed_digits, and $ranges: the
+#                 separate ranges of possible p between $min_p and $max_p)
 evaluate_pair_t_test <- function(
   m1s,
   sd1s,
@@ -597,11 +598,16 @@ evaluate_pair_t_test <- function(
   # A finer value exactly halfway between two coarser ones (4.15 at 1 decimal)
   # has a rounding interval straddling both, so every such combination is
   # recalculated and the results are pooled.
+  # recalc (0.6) skips every candidate SD that is exactly 0, which leaves only
+  # the upper end of a zero SD's rounding interval and makes the smallest
+  # recalculated p too large. A tiny positive SD stands in for the lower end.
+  # ponytail: drop nonzero() once recalc evaluates SD = 0 itself.
+  nonzero <- function(sd) pmax(sd, 1e-8)
   grid <- expand.grid(
     m1 = coarsen(m1, m_digits),
     m2 = coarsen(m2, m_digits),
-    sd1 = coarsen(sd1, sd_digits),
-    sd2 = coarsen(sd2, sd_digits)
+    sd1 = nonzero(coarsen(sd1, sd_digits)),
+    sd2 = nonzero(coarsen(sd2, sd_digits))
   )
   reps <- tryCatch(
     lapply(seq_len(nrow(grid)), function(i) {
@@ -620,7 +626,7 @@ evaluate_pair_t_test <- function(
         p_operator = p_operator,
         alternative = "two.sided",
         direction = "both"
-      ))$reproduced
+      ))
     }),
     error = function(e) {
       paste("Could not recalculate:", sub("\n.*", "", conditionMessage(e)))
@@ -629,9 +635,20 @@ evaluate_pair_t_test <- function(
   if (is.character(reps)) {
     return(list(status = "error", msg = reps))
   }
+  # Student's and Welch's tests each give their own range of possible p, and
+  # the two need not overlap. A reported p in the gap between them is not
+  # reproduced, so the ranges are kept apart instead of shown as one span.
+  ranges <- merge_ranges(
+    do.call(
+      rbind,
+      lapply(reps, function(r) r$method_intervals[c("p_min", "p_max")])
+    ),
+    p_digits
+  )
+  reps <- lapply(reps, function(r) r$reproduced)
   min_p <- min(vapply(reps, function(r) r$min_p, numeric(1)))
   max_p <- max(vapply(reps, function(r) r$max_p, numeric(1)))
-  if (anyNA(c(min_p, max_p))) {
+  if (anyNA(c(min_p, max_p)) || is.null(ranges)) {
     return(list(status = "error", msg = "Could not recalculate"))
   }
 
@@ -641,6 +658,7 @@ evaluate_pair_t_test <- function(
     p_reported = if (p_given) p_num else NA_real_,
     min_p = min_p,
     max_p = max_p,
+    ranges = ranges,
     inbounds = if (p_given) {
       any(vapply(reps, function(r) isTRUE(r$p_inbounds), logical(1)))
     } else {
@@ -653,6 +671,40 @@ evaluate_pair_t_test <- function(
 }
 
 MIXED_DIGITS_NOTE <- "Groups differ in decimal places; coarser precision used"
+
+# Merges ranges (data frame with p_min, p_max) that overlap or touch once
+# rounded to `digits`, so that only gaps visible in the display remain.
+merge_ranges <- function(ranges, digits) {
+  if (is.null(ranges) || anyNA(ranges)) {
+    return(NULL)
+  }
+  ranges <- ranges[order(ranges$p_min), ]
+  out <- ranges[1, ]
+  for (i in seq_len(nrow(ranges))[-1]) {
+    k <- nrow(out)
+    if (round(ranges$p_min[i], digits) <= round(out$p_max[k], digits)) {
+      out$p_max[k] <- max(out$p_max[k], ranges$p_max[i])
+    } else {
+      out <- rbind(out, ranges[i, ])
+    }
+  }
+  out
+}
+
+# "p ∈ [0.005, 0.019] or [0.356, 0.518]"
+p_ranges_text <- function(ranges, digits) {
+  paste0(
+    "p ∈ ",
+    paste0(
+      "[",
+      vapply(ranges$p_min, format_p_value, character(1), digits),
+      ", ",
+      vapply(ranges$p_max, format_p_value, character(1), digits),
+      "]",
+      collapse = " or "
+    )
+  )
+}
 
 # Candidate values of `v` when re-expressed at `digits` decimal places: its
 # rounded value, or both neighbours if it sits exactly halfway between them.
@@ -797,13 +849,7 @@ t_test_result_ui <- function(tt) {
   }
 
   dg <- tt$p_digits
-  range_txt <- paste0(
-    "p ∈ [",
-    format_p_value(tt$min_p, dg),
-    ", ",
-    format_p_value(tt$max_p, dg),
-    "]"
-  )
+  range_txt <- p_ranges_text(tt$ranges, dg)
   mixed_note <- if (isTRUE(tt$mixed_digits)) {
     span(
       class = "text-muted",
@@ -1741,7 +1787,10 @@ ui <- page_navbar(
             " and Welch's t-tests are computed, in both effect directions. This",
             " yields a range ",
             tags$em("[min p, max p]"),
-            " rather than a single value.",
+            " rather than a single value. When Student's and Welch's tests",
+            " disagree strongly (very unequal SDs and group sizes), their",
+            " ranges do not overlap; both are then shown, and a reported p in",
+            " the gap between them is not reproduced.",
             br(),
             br(),
             "If you enter a ",
@@ -2441,8 +2490,21 @@ server <- function(input, output, session) {
             },
             p_note = if (is_first && identical(tt$status, "error")) {
               tt$msg
-            } else if (is_first && tt_ok && isTRUE(tt$mixed_digits)) {
-              MIXED_DIGITS_NOTE
+            } else if (is_first && tt_ok) {
+              # recalc_p_min and recalc_p_max span all ranges; name them when
+              # there is a gap, since a reported p inside it is not reproduced.
+              paste(
+                c(
+                  if (isTRUE(tt$mixed_digits)) MIXED_DIGITS_NOTE,
+                  if (nrow(tt$ranges) > 1) {
+                    paste(
+                      "Student's and Welch's t-tests give separate ranges:",
+                      p_ranges_text(tt$ranges, tt$p_digits)
+                    )
+                  }
+                ),
+                collapse = "; "
+              )
             } else {
               ""
             },

@@ -1,5 +1,5 @@
 # Self-check for app.R. Run from the project root with: Rscript tests.R
-# Stops with an error at the first failing assertion. Takes about a minute.
+# Stops with an error at the first failing assertion. Takes about two minutes.
 # Run it before every deploy.
 
 app <- suppressMessages(source("app.R")$value)
@@ -69,19 +69,20 @@ section("No false positives on 2,000 simulated data sets")
 
 # No false positives on real data ------------------------------------------
 # Summary statistics of genuine integer data inside the bounds must never be
-# flagged, whatever the rounding.
+# flagged, whatever the rounding: 0 to 3 decimals, small and large samples,
+# short scales and wide ranges (e.g. age in years, scores up to 1000).
 
 set.seed(42)
 for (i in 1:2000) {
-  n <- sample(2:60, 1)
+  n <- if (runif(1) < .85) sample(2:60, 1) else sample(61:400, 1)
   it <- sample(c(1, 1, 1, 3, 5), 1)
-  lo <- sample(c(0, 1, -3), 1)
-  hi <- lo + sample(1:10, 1)
+  lo <- sample(c(0, 1, -3, 18), 1)
+  hi <- lo + sample(c(1:10, 72, 1000), 1)
   prob <- if (runif(1) < .4) c(20, rep(1, hi - lo)) else NULL
   d <- rowMeans(matrix(sample(lo:hi, n * it, TRUE, prob = prob), n))
   r <- evaluate(
-    formatC(mean(d), format = "f", digits = sample(1:2, 1)),
-    formatC(sd(d), format = "f", digits = sample(1:2, 1)),
+    formatC(mean(d), format = "f", digits = sample(0:3, 1)),
+    formatC(sd(d), format = "f", digits = sample(0:3, 1)),
     as.character(n),
     it,
     "Whole-number mean",
@@ -508,6 +509,28 @@ stopifnot(
   identical(coarsen(4.15, 1), c(4.1, 4.2)),
   identical(coarsen(4.13, 1), 4.1)
 )
+# p = .085 is reachable from 4.2 but not from 4.1, and one neighbour is enough.
+stopifnot(isTRUE(
+  run_t_test("5.2", "2.1", "30", "4.15", "1.90", "30", p = "0.085")$inbounds
+))
+
+# Student's and Welch's ranges can be disjoint. A p in the gap is flagged, so
+# the displayed ranges must not contain it, although [min_p, max_p] does.
+gap_t_test <- function(p) {
+  run_t_test("0.92", "0.4", "6", "1.864", "3", "117", p = p)
+}
+r <- gap_t_test("0.100")
+stopifnot(
+  isFALSE(r$inbounds),
+  r$min_p < 0.1 && 0.1 < r$max_p,
+  nrow(r$ranges) == 2,
+  !any(r$ranges$p_min <= 0.1 & 0.1 <= r$ranges$p_max),
+  identical(range(unlist(r$ranges)), c(r$min_p, r$max_p)),
+  p_ranges_text(r$ranges, 3) == "p ∈ [<0.001, 0.019] or [0.356, 0.518]",
+  grepl("or [0.356", format(t_test_result_ui(r)), fixed = TRUE),
+  isTRUE(gap_t_test("0.400")$inbounds), # in Student's range
+  nrow(run_t_test("5.23", "2.1", "30", "4.10", "1.9", "30")$ranges) == 1
+)
 
 stopifnot(
   run_t_test("5.23", "2.1", "30.9", "4.10", "1.9", "30")$msg == N_FORMAT_MSG,
@@ -527,30 +550,76 @@ stopifnot(
   run_t_test("", "", "", "", "", "")$status == "blank"
 )
 
-section("t-test p values from 60 simulated data sets")
+# An SD of 0 at the working precision (here SD1 "0.4" coarsened to SD2's 0
+# decimals) still has a rounding interval reaching down to 0. This p is the
+# Welch result for genuine data with these summary statistics.
+r <- run_t_test("0.92", "0.4", "6", "1.864", "3", "117", p = "0.003")
+stopifnot(isTRUE(r$inbounds), r$min_p < 0.001)
+stopifnot(isTRUE(
+  run_t_test(
+    "5.2",
+    "0.0",
+    "6",
+    "4.1",
+    "0.6",
+    "40",
+    p = "0.001",
+    op = "less_than"
+  )$inbounds
+))
+
+section("t-test p values from 500 simulated data sets")
 
 # p values recalculated from genuine data, by Student's or Welch's test,
-# must be reproduced from the rounded summary statistics.
+# must be reproduced from the rounded summary statistics: whole-number, normal
+# and skewed data, samples from n = 2, 0 to 3 decimals (sometimes differing
+# between the groups), and p reported exactly or as an inequality.
 set.seed(3)
-for (i in 1:60) {
-  n1 <- sample(5:80, 1)
-  n2 <- sample(5:80, 1)
-  g1 <- sample(1:7, n1, TRUE)
-  g2 <- sample(1:7, n2, TRUE, prob = c(1, 1, 2, 3, 3, 2, 1))
+for (i in 1:500) {
+  n1 <- sample(c(2:10, 5:300), 1)
+  n2 <- sample(c(2:10, 5:300), 1)
+  kind <- sample(3, 1)
+  g1 <- switch(kind, sample(1:7, n1, TRUE), rnorm(n1, 50, 10), rlnorm(n1))
+  g2 <- switch(
+    kind,
+    sample(1:7, n2, TRUE, prob = c(1, 1, 2, 3, 3, 2, 1)),
+    rnorm(n2, 50 + rnorm(1, 0, 4), 10 * runif(1, .3, 3)),
+    rlnorm(n2, runif(1, 0, .5))
+  )
+  if (sd(g1) == 0 && sd(g2) == 0) {
+    next # t is undefined
+  }
   p <- t.test(g1, g2, var.equal = runif(1) < .5)$p.value
-  dm <- sample(1:2, 1)
-  ds <- sample(1:2, 1)
+  dm <- sample(0:3, 2, TRUE)
+  ds <- sample(0:3, 2, TRUE)
+  if (runif(1) < .7) {
+    dm[2] <- dm[1]
+    ds[2] <- ds[1]
+  }
+  if (runif(1) < .7) {
+    p_str <- fmt(p, sample(1:4, 1))
+    op <- "equals"
+  } else {
+    threshold <- sample(c(0.05, 0.01, 0.001), 1)
+    p_str <- as.character(threshold)
+    op <- if (p < threshold) {
+      "less_than"
+    } else {
+      sample(c("greater_than", "greater_than_or_equal_to"), 1)
+    }
+  }
   args <- list(
-    fmt(mean(g1), dm),
-    fmt(sd(g1), ds),
+    fmt(mean(g1), dm[1]),
+    fmt(sd(g1), ds[1]),
     as.character(n1),
-    fmt(mean(g2), dm),
-    fmt(sd(g2), ds),
+    fmt(mean(g2), dm[2]),
+    fmt(sd(g2), ds[2]),
     as.character(n2),
-    p = fmt(p, sample(2:3, 1))
+    p = p_str,
+    op = op
   )
   if (!isTRUE(do.call(run_t_test, args)$inbounds)) {
-    stop("Genuine p not reproduced: ", deparse(args))
+    stop("Genuine p (", p, ") not reproduced: ", deparse(args))
   }
 }
 
@@ -641,6 +710,27 @@ shiny::testServer(app, {
     csv$group == "2",
     csv$reported_p == "1.5",
     csv$p_note == "Reported p must be between 0 and 1"
+  )
+
+  # Disjoint Student's and Welch's ranges are spelled out in the CSV.
+  session$setInputs(
+    cb_x_1a = "0.92",
+    cb_sd_1a = "0.4",
+    cb_n_1a = "6",
+    cb_x_1b = "1.864",
+    cb_sd_1b = "3",
+    cb_n_1b = "117",
+    cb_p_1 = "0.100"
+  )
+  csv <- read.csv(output$download_csv, colClasses = "character")
+  stopifnot(
+    csv$p_reproduces[1] == "FALSE",
+    csv$p_note[1] ==
+      paste0(
+        MIXED_DIGITS_NOTE,
+        "; Student's and Welch's t-tests give separate ranges: ",
+        "p ∈ [<0.001, 0.019] or [0.356, 0.518]"
+      )
   )
 })
 
