@@ -17,7 +17,7 @@ MAX_ROWS <- 15
 
 # Helpers -----------------------------------------------------------------
 
-parse_num <- function(s) {
+parse_number <- function(s) {
   if (is.null(s)) {
     return(NA_real_)
   }
@@ -31,18 +31,27 @@ parse_num <- function(s) {
   as.numeric(s)
 }
 
-dp_of <- function(s) {
-  decimal_places_scalar(gsub(",", ".", trimws(s)))
+# N is checked on the string, digits only: a separator is ambiguous across
+# locales ("2,000" and "2.000" each mean 2 in some and 2000 in others), and
+# parse_number() would read both as 2.
+is_plain_whole_number <- function(s) grepl("^[0-9]+$", trimws(s))
+
+N_FORMAT_MSG <- "N must be a whole number without separators (e.g., 2000)"
+
+# scrutiny counts decimals after a single separator, but the app accepts both
+# a decimal point and a decimal comma, as parse_number() does.
+count_decimal_places <- function(s) {
+  decimal_places_scalar(gsub(",", ".", s))
 }
 
 safe_grim <- function(x_str, n_str, items, percent = FALSE) {
-  x <- parse_num(x_str)
-  n <- suppressWarnings(as.integer(parse_num(n_str)))
+  x <- parse_number(x_str)
+  n <- suppressWarnings(as.integer(parse_number(n_str)))
   # grim() adds 2 to digits_x internally when percent = TRUE, so we must not add
   # it here as well: doing so would give percentages dp + 4 effective decimal
   # places, making the test wrongly strict and disagreeing with
   # grim_uninformative() (which relies on grim_probability()'s internal +2).
-  dx <- decimal_places_scalar(gsub(",", ".", trimws(x_str)))
+  dx <- count_decimal_places(x_str)
   it <- suppressWarnings(as.integer(items))
   if (anyNA(c(x, n, it)) || n < 2 || it < 1) {
     return(NA)
@@ -54,8 +63,8 @@ safe_grim <- function(x_str, n_str, items, percent = FALSE) {
 }
 
 grim_uninformative <- function(x_str, n_str, items, percent = FALSE) {
-  x <- parse_num(x_str)
-  n <- suppressWarnings(as.integer(parse_num(n_str)))
+  x <- parse_number(x_str)
+  n <- suppressWarnings(as.integer(parse_number(n_str)))
   it <- suppressWarnings(as.integer(items))
   if (anyNA(c(x, n, it)) || n < 2 || it < 1) {
     return(FALSE)
@@ -63,7 +72,7 @@ grim_uninformative <- function(x_str, n_str, items, percent = FALSE) {
   p <- grim_probability(
     x = x,
     n = n,
-    digits_x = dp_of(x_str),
+    digits_x = count_decimal_places(x_str),
     items = it,
     percent = percent
   )
@@ -71,11 +80,11 @@ grim_uninformative <- function(x_str, n_str, items, percent = FALSE) {
 }
 
 safe_grimmer <- function(x_str, sd_str, n_str, items) {
-  x <- parse_num(x_str)
-  sd <- parse_num(sd_str)
-  n <- suppressWarnings(as.integer(parse_num(n_str)))
-  dx <- decimal_places_scalar(gsub(",", ".", trimws(x_str)))
-  ds <- decimal_places_scalar(gsub(",", ".", trimws(sd_str)))
+  x <- parse_number(x_str)
+  sd <- parse_number(sd_str)
+  n <- suppressWarnings(as.integer(parse_number(n_str)))
+  dx <- count_decimal_places(x_str)
+  ds <- count_decimal_places(sd_str)
   it <- suppressWarnings(as.integer(items))
   if (anyNA(c(x, sd, n, it)) || n < 2 || it < 1) {
     return(list(ok = NA, reason = ""))
@@ -98,9 +107,9 @@ safe_bounds <- function(x_str, sd_str, n_str, min_str, max_str) {
   if (!min_given || !max_given) {
     return(character(0))
   }
-  x <- parse_num(x_str)
-  mn <- parse_num(min_str)
-  mx <- parse_num(max_str)
+  x <- parse_number(x_str)
+  mn <- parse_number(min_str)
+  mx <- parse_number(max_str)
   reasons <- character(0)
   if (anyNA(c(x, mn, mx))) {
     return(reasons)
@@ -110,7 +119,7 @@ safe_bounds <- function(x_str, sd_str, n_str, min_str, max_str) {
   # value in those rounding intervals could satisfy. `eps` absorbs
   # floating-point error at the interval edges.
   eps <- sqrt(.Machine$double.eps)
-  half <- 0.5 * 10^(-dp_of(x_str))
+  half <- 0.5 * 10^(-count_decimal_places(x_str))
   lo <- max(x - half, mn)
   hi <- min(x + half, mx)
   mean_out <- lo > hi + eps
@@ -119,8 +128,8 @@ safe_bounds <- function(x_str, sd_str, n_str, min_str, max_str) {
   }
   sd_given <- !is.null(sd_str) && nzchar(trimws(sd_str))
   if (sd_given) {
-    sd <- parse_num(sd_str)
-    n <- suppressWarnings(as.integer(parse_num(n_str)))
+    sd <- parse_number(sd_str)
+    n <- suppressWarnings(as.integer(parse_number(n_str)))
     if (!anyNA(c(sd, n)) && n >= 2 && mx > mn) {
       # Bhatia–Davis upper bound on the variance for data confined to
       # [min, max] with mean m: (max - m) * (m - min), times n / (n - 1) for
@@ -130,7 +139,7 @@ safe_bounds <- function(x_str, sd_str, n_str, min_str, max_str) {
       # is valid and both reasons are reported.
       m <- min(max((mn + mx) / 2, lo), hi)
       var_max <- max((mx - m) * (m - mn), 0) * n / (n - 1)
-      tol <- 0.5 * 10^(-dp_of(sd_str))
+      tol <- 0.5 * 10^(-count_decimal_places(sd_str))
       if (mean_out || sd - tol > sqrt(var_max) + eps) {
         reasons <- c(reasons, "SD exceeds Bhatia–Davis bound")
       }
@@ -156,7 +165,7 @@ friendly_reason <- function(reason) {
   reason
 }
 
-fmt_p <- function(p, digits = 3) {
+format_p_value <- function(p, digits = 3) {
   if (is.null(p) || length(p) == 0 || is.na(p)) {
     return("NA")
   }
@@ -175,7 +184,7 @@ fmt_p <- function(p, digits = 3) {
 }
 
 # Display symbol for a recalc p_operator value.
-op_symbol <- function(op) {
+operator_symbol <- function(op) {
   if (is.null(op) || !nzchar(op)) {
     return("=")
   }
@@ -203,7 +212,7 @@ validate_combined_row <- function(
   max_str = NULL
 ) {
   if (!is.null(x_str) && nzchar(trimws(x_str))) {
-    x_num <- parse_num(x_str)
+    x_num <- parse_number(x_str)
     if (is.na(x_num)) {
       return("Mean must be a number")
     }
@@ -220,20 +229,17 @@ validate_combined_row <- function(
     )
   }
   if (sd_given) {
-    sd_num <- parse_num(sd_str)
+    sd_num <- parse_number(sd_str)
     if (is.na(sd_num)) {
       return("SD must be a number")
     }
     if (sd_num < 0) return("SD cannot be negative")
   }
   if (!is.null(n_str) && nzchar(trimws(n_str))) {
-    n_num <- parse_num(n_str)
-    if (is.na(n_num)) {
-      return("N must be a number")
+    if (!is_plain_whole_number(n_str)) {
+      return(N_FORMAT_MSG)
     }
-    if (n_num != round(n_num)) {
-      return("N must be a whole number")
-    }
+    n_num <- parse_number(n_str)
     if (n_num < 2) {
       return("N must be at least 2")
     }
@@ -248,15 +254,15 @@ validate_combined_row <- function(
   ) {
     return("Items must be a positive whole number")
   }
-  if (min_given && is.na(parse_num(min_str))) {
+  if (min_given && is.na(parse_number(min_str))) {
     return("Min must be a number")
   }
-  if (max_given && is.na(parse_num(max_str))) {
+  if (max_given && is.na(parse_number(max_str))) {
     return("Max must be a number")
   }
   if (min_given && max_given) {
-    mn <- parse_num(min_str)
-    mx <- parse_num(max_str)
+    mn <- parse_number(min_str)
+    mx <- parse_number(max_str)
     if (!is.na(mn) && !is.na(mx) && mx <= mn) {
       return("Max must be greater than Min")
     }
@@ -307,11 +313,17 @@ evaluate_row_unsafe <- function(
   integer = TRUE
 ) {
   if (is.null(x_str) || !nzchar(trimws(x_str))) {
+    # Min and Max are left out: Percentage auto-fills them.
+    started <- any(vapply(
+      list(sd_str, n_str),
+      function(s) !is.null(s) && nzchar(trimws(s)),
+      logical(1)
+    ))
     return(list(
       ok = NA,
       reasons = character(0),
       tests_run = character(0),
-      notes = character(0),
+      notes = if (started) "Awaiting mean" else character(0),
       err = NULL
     ))
   }
@@ -383,16 +395,35 @@ evaluate_row_unsafe <- function(
     }
   }
 
-  # Explain the absence of a GRIM/GRIMMER result. When Bounds still yields a
-  # badge, word the note so it qualifies that verdict rather than seeming to
-  # contradict it: a "Consistent" here covers the Bounds checks only.
+  # Explain every test that was skipped. When Bounds still yields a badge, word
+  # the note so it qualifies that verdict rather than seeming to contradict it:
+  # a "Consistent" here covers only the checks named. Without N, the
+  # Bhatia–Davis SD bound is skipped too, leaving just the mean's bounds.
+  n_given <- !is.null(n_str) && nzchar(trimws(n_str))
+  sd_bound_skipped <- bounds_active && sd_given && !n_given
+  scope <- if (sd_bound_skipped) "Mean bounds only" else "Bounds only"
   if (!isTRUE(integer)) {
     notes <- c(
       notes,
       if (length(tests_run) == 0) {
         "GRIM/GRIMMER only apply to integer data"
       } else {
-        "Bounds only; GRIM/GRIMMER need integer data"
+        paste0(scope, "; GRIM/GRIMMER need integer data")
+      },
+      if (sd_bound_skipped) "SD bound needs N"
+    )
+  } else if (!n_given) {
+    notes <- c(
+      notes,
+      if (length(tests_run) == 0) {
+        "Awaiting N for GRIM/GRIMMER"
+      } else {
+        paste0(
+          scope,
+          "; GRIM/GRIMMER",
+          if (sd_bound_skipped) " and SD bound",
+          " need N"
+        )
       }
     )
   }
@@ -421,7 +452,7 @@ evaluate_row_unsafe <- function(
     uninformative = uninformative,
     # GRIM works on the proportion for percentages, so its granularity is
     # dp + 2.
-    grim_digits = dp_of(x_str) + if (is_percent) 2L else 0L
+    grim_digits = count_decimal_places(x_str) + if (is_percent) 2L else 0L
   )
 }
 
@@ -438,7 +469,7 @@ evaluate_row_unsafe <- function(
 # - "error":      an explicit problem (with $msg)
 # - "ok":         recalculated (with $min_p, $max_p, $p_given, $p_reported,
 #                 $inbounds, $p_digits, $mixed_digits)
-evaluate_pair_ttest <- function(
+evaluate_pair_t_test <- function(
   m1s,
   sd1s,
   n1s,
@@ -454,7 +485,7 @@ evaluate_pair_ttest <- function(
   # A reported p outside [0, 1] is invalid regardless of whether the group
   # statistics are complete, so flag it before the completeness checks below.
   if (!is.null(p_str) && nzchar(trimws(p_str))) {
-    p_check <- parse_num(p_str)
+    p_check <- parse_number(p_str)
     if (is.na(p_check)) {
       return(list(status = "error", msg = "Reported p must be a number"))
     }
@@ -475,23 +506,21 @@ evaluate_pair_ttest <- function(
     return(list(status = "incomplete"))
   }
 
-  m1 <- parse_num(m1s)
-  m2 <- parse_num(m2s)
-  sd1 <- parse_num(sd1s)
-  sd2 <- parse_num(sd2s)
-  n1 <- parse_num(n1s)
-  n2 <- parse_num(n2s)
+  m1 <- parse_number(m1s)
+  m2 <- parse_number(m2s)
+  sd1 <- parse_number(sd1s)
+  sd2 <- parse_number(sd2s)
+  n1 <- parse_number(n1s)
+  n2 <- parse_number(n2s)
 
-  if (anyNA(c(m1, m2, sd1, sd2, n1, n2))) {
-    return(list(status = "error", msg = "Mean, SD and N must be numbers"))
+  if (anyNA(c(m1, m2, sd1, sd2))) {
+    return(list(status = "error", msg = "Mean and SD must be numbers"))
   }
-  if (
-    n1 != round(n1) || n2 != round(n2) || max(n1, n2) > .Machine$integer.max
-  ) {
-    return(list(
-      status = "error",
-      msg = "N must be a whole number in both groups"
-    ))
+  if (!is_plain_whole_number(n1s) || !is_plain_whole_number(n2s)) {
+    return(list(status = "error", msg = N_FORMAT_MSG))
+  }
+  if (max(n1, n2) > .Machine$integer.max) {
+    return(list(status = "error", msg = "N is too large"))
   }
   if (n1 < 2 || n2 < 2) {
     return(list(status = "error", msg = "N must be ≥ 2 in both groups"))
@@ -504,7 +533,7 @@ evaluate_pair_ttest <- function(
 
   # Reported p was already validated to lie in [0, 1] above.
   p_given <- !is.null(p_str) && nzchar(trimws(p_str))
-  p_num <- if (p_given) parse_num(p_str) else NULL
+  p_num <- if (p_given) parse_number(p_str) else NULL
 
   # recalc requires a single decimal-place count for the means and one for the
   # SDs. Baseline tables almost always report both groups to the same
@@ -513,10 +542,11 @@ evaluate_pair_ttest <- function(
   # could wrongly flag a correct p. The finer value is rounded to the coarser
   # precision, whose rounding interval contains its own, so the recalculated
   # range can only widen.
-  m_digits <- min(dp_of(m1s), dp_of(m2s))
-  sd_digits <- min(dp_of(sd1s), dp_of(sd2s))
-  mixed_digits <- dp_of(m1s) != dp_of(m2s) || dp_of(sd1s) != dp_of(sd2s)
-  p_digits <- if (p_given) max(1L, dp_of(p_str)) else 3L
+  m_digits <- min(count_decimal_places(m1s), count_decimal_places(m2s))
+  sd_digits <- min(count_decimal_places(sd1s), count_decimal_places(sd2s))
+  mixed_digits <- count_decimal_places(m1s) != count_decimal_places(m2s) ||
+    count_decimal_places(sd1s) != count_decimal_places(sd2s)
+  p_digits <- if (p_given) max(1L, count_decimal_places(p_str)) else 3L
 
   # A finer value exactly halfway between two coarser ones (4.15 at 1 decimal)
   # has a rounding interval straddling both, so every such combination is
@@ -705,7 +735,7 @@ result_ui <- function(
 }
 
 # UI for the t-test recalculation result of a pair.
-ttest_result_ui <- function(tt) {
+t_test_result_ui <- function(tt) {
   if (is.null(tt) || identical(tt$status, "blank")) {
     return(span())
   }
@@ -723,9 +753,9 @@ ttest_result_ui <- function(tt) {
   dg <- tt$p_digits
   range_txt <- paste0(
     "p ∈ [",
-    fmt_p(tt$min_p, dg),
+    format_p_value(tt$min_p, dg),
     ", ",
-    fmt_p(tt$max_p, dg),
+    format_p_value(tt$max_p, dg),
     "]"
   )
   mixed_note <- if (isTRUE(tt$mixed_digits)) {
@@ -798,7 +828,7 @@ summary_bar <- function(results_vec) {
 }
 
 # Summary line for the t-test recalculations across pairs.
-ttest_summary_bar <- function(tts) {
+t_test_summary_bar <- function(tts) {
   decided <- Filter(
     function(tt) {
       identical(tt$status, "ok") && isTRUE(tt$p_given) && !is.na(tt$inbounds)
@@ -832,7 +862,7 @@ ttest_summary_bar <- function(tts) {
   )
 }
 
-next_free <- function(active, max_slots) {
+next_free_slot <- function(active, max_slots) {
   candidate <- setdiff(seq_len(max_slots), active)
   if (length(candidate) == 0) {
     return(NULL)
@@ -843,7 +873,7 @@ next_free <- function(active, max_slots) {
 
 # Row UI (pre-created; show/hide via CSS) ---------------------------------
 
-rm_btn <- function(id) {
+remove_button <- function(id) {
   actionButton(
     id,
     label = tags$img(
@@ -989,9 +1019,9 @@ combined_pair <- function(p) {
       ),
       div(
         class = "grid-cell d-flex align-items-center",
-        uiOutput(paste0("cb_ttest_", p))
+        uiOutput(paste0("cb_t_test_", p))
       ),
-      div(class = "grid-cell", rm_btn(paste0("cb_rm_", p)))
+      div(class = "grid-cell", remove_button(paste0("cb_rm_", p)))
     ),
     div(
       id = paste0("cb_slot_", p, "b"),
@@ -1127,7 +1157,7 @@ single_row <- function(id) {
       class = "grid-cell d-flex align-items-center",
       uiOutput(paste0("gb_badge_", id))
     ),
-    div(class = "grid-cell", rm_btn(paste0("gb_rm_", id)))
+    div(class = "grid-cell", remove_button(paste0("gb_rm_", id)))
   )
 }
 
@@ -1472,7 +1502,7 @@ ui <- page_navbar(
             )
           ),
           uiOutput("combined_summary"),
-          uiOutput("ttest_summary")
+          uiOutput("t_test_summary")
         )
       ),
       p(
@@ -1616,7 +1646,11 @@ ui <- page_navbar(
             tags$em("Integer data"),
             "box, which is unticked by default. Without it, only the Bounds",
             "checks are run, so a \"Consistent\" result then refers to the",
-            "bounds alone.",
+            "bounds alone. Likewise, GRIM, GRIMMER and the Bhatia–Davis SD",
+            "bound need the sample size; without it, only the mean's bounds",
+            "are checked. A note next to the result names any skipped tests.",
+            "Enter N as plain digits, without separators (e.g., 2000, not",
+            "2,000).",
             br(),
             br(),
             "Click \"Download CSV\" to get all the results in a tabular file."
@@ -1834,7 +1868,7 @@ server <- function(input, output, session) {
   # ── Single-row tab: GRIM / GRIMMER / Bounds (gb_ namespace) ───────────────
   gb_slots <- reactiveVal(1:3)
 
-  gb_vis_css <- function(active) {
+  single_visibility_css <- function(active) {
     rules <- vapply(
       seq_len(MAX_ROWS),
       function(i) {
@@ -1846,7 +1880,7 @@ server <- function(input, output, session) {
     tags$style(paste(rules, collapse = ""))
   }
 
-  output$gb_vis <- renderUI(gb_vis_css(gb_slots()))
+  output$gb_vis <- renderUI(single_visibility_css(gb_slots()))
 
   output$gb_empty <- renderUI({
     if (length(gb_slots()) == 0) {
@@ -1860,7 +1894,7 @@ server <- function(input, output, session) {
   # Slots are kept sorted so that the CSV lists rows in on-screen (DOM) order.
   observeEvent(input$gb_add, {
     s <- gb_slots()
-    ns <- next_free(s, MAX_ROWS)
+    ns <- next_free_slot(s, MAX_ROWS)
     if (!is.null(ns)) gb_slots(sort(c(s, ns)))
   })
 
@@ -2052,7 +2086,7 @@ server <- function(input, output, session) {
   # ── Paired tab: GRIM / GRIMMER / Bounds / t-test p value (cb_ namespace) ──
   pairs <- reactiveVal(1:2)
 
-  vis_css <- function(active) {
+  paired_visibility_css <- function(active) {
     rules <- vapply(
       seq_len(MAX_PAIRS),
       function(p) {
@@ -2070,7 +2104,7 @@ server <- function(input, output, session) {
     tags$style(paste(rules, collapse = ""))
   }
 
-  output$combined_vis <- renderUI(vis_css(pairs()))
+  output$combined_vis <- renderUI(paired_visibility_css(pairs()))
 
   output$combined_empty <- renderUI({
     if (length(pairs()) == 0) {
@@ -2083,7 +2117,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$combined_add, {
     s <- pairs()
-    ns <- next_free(s, MAX_PAIRS)
+    ns <- next_free_slot(s, MAX_PAIRS)
     if (!is.null(ns)) pairs(sort(c(s, ns)))
   })
 
@@ -2100,7 +2134,7 @@ server <- function(input, output, session) {
     )
   }
 
-  eval_rid <- function(rid) {
+  row_result_from_inputs <- function(rid) {
     r <- read_row(rid)
     # The Integer-data flag is per-pair; strip the trailing side letter to get
     # the pair index (e.g. "12a" -> "12").
@@ -2109,10 +2143,10 @@ server <- function(input, output, session) {
     evaluate_row(r$x, r$sd, r$n, r$items, r$type, r$min, r$max, integer)
   }
 
-  eval_pair_ttest <- function(p) {
+  pair_t_test_from_inputs <- function(p) {
     rid_a <- paste0(p, "a")
     rid_b <- paste0(p, "b")
-    evaluate_pair_ttest(
+    evaluate_pair_t_test(
       input[[paste0("cb_x_", rid_a)]],
       input[[paste0("cb_sd_", rid_a)]],
       input[[paste0("cb_n_", rid_a)]],
@@ -2123,6 +2157,13 @@ server <- function(input, output, session) {
       input[[paste0("cb_pop_", p)]]
     )
   }
+
+  # The recalculation is slow (~0.1 s per pair), so each pair is computed once
+  # here and shared by its badge, the summary and the CSV. An edit then only
+  # reruns the pair it touches.
+  t_test_results <- lapply(seq_len(MAX_PAIRS), function(p) {
+    reactive(pair_t_test_from_inputs(p))
+  })
 
   # Pre-register outputs and observers for every possible pair / row
   for (p in seq_len(MAX_PAIRS)) {
@@ -2164,8 +2205,8 @@ server <- function(input, output, session) {
       }
 
       # Per-pair t-test recalculation result
-      output[[paste0("cb_ttest_", pp)]] <- renderUI({
-        ttest_result_ui(eval_pair_ttest(pp))
+      output[[paste0("cb_t_test_", pp)]] <- renderUI({
+        t_test_result_ui(t_test_results[[pp]]())
       })
 
       # Per-pair removal (clears both rows + Variable + Reported p)
@@ -2209,20 +2250,24 @@ server <- function(input, output, session) {
   output$combined_summary <- renderUI({
     s <- pairs()
     rids <- unlist(lapply(s, function(p) paste0(p, c("a", "b"))))
-    results <- vapply(rids, function(rid) eval_rid(rid)$ok, logical(1))
+    results <- vapply(
+      rids,
+      function(rid) row_result_from_inputs(rid)$ok,
+      logical(1)
+    )
     summary_bar(results)
   })
 
-  output$ttest_summary <- renderUI({
+  output$t_test_summary <- renderUI({
     s <- pairs()
-    tts <- lapply(s, eval_pair_ttest)
-    ttest_summary_bar(tts)
+    tts <- lapply(s, function(p) t_test_results[[p]]())
+    t_test_summary_bar(tts)
   })
 
   output$download_csv <- downloadHandler(
     filename = function() {
       paste0(
-        "grim-grimmer-ttest-",
+        "grim-grimmer-t-test-",
         format(Sys.time(), "%Y%m%d-%H%M%S"),
         ".csv"
       )
@@ -2231,7 +2276,7 @@ server <- function(input, output, session) {
       s <- pairs()
       pair_counter <- 0L
       rows <- lapply(s, function(p) {
-        tt <- eval_pair_ttest(p)
+        tt <- t_test_results[[p]]()
         variable <- input[[paste0("cb_var_", p)]]
         integer <- isTRUE(input[[paste0("cb_int_", p)]])
         p_str <- input[[paste0("cb_p_", p)]]
@@ -2326,7 +2371,7 @@ server <- function(input, output, session) {
             p_operator = if (
               is_first && !is.null(p_str) && nzchar(trimws(p_str))
             ) {
-              op_symbol(pop)
+              operator_symbol(pop)
             } else {
               ""
             },

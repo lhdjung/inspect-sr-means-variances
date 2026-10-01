@@ -3,7 +3,7 @@
 
 app <- suppressMessages(source("app.R")$value)
 
-ev <- function(
+evaluate <- function(
   x,
   sd = "",
   n = "",
@@ -19,29 +19,29 @@ ev <- function(
 # GRIM / GRIMMER actually run and give known verdicts ----------------------
 # (guards against scrutiny API changes silently disabling a test)
 
-r <- ev("5.20", "2.54", "30")
+r <- evaluate("5.20", "2.54", "30")
 stopifnot(identical(r$tests_run, c("GRIM", "GRIMMER")), isTRUE(r$ok))
-r <- ev("5.20", "2.53", "30")
+r <- evaluate("5.20", "2.53", "30")
 stopifnot(isFALSE(r$ok), identical(r$reasons, "SD fails GRIMMER (test 3)"))
-r <- ev("5.21", "", "30")
+r <- evaluate("5.21", "", "30")
 stopifnot(isFALSE(r$ok), identical(r$reasons, "Mean fails GRIM"))
-stopifnot(isTRUE(ev("45.5", "", "22", type = "Percentage")$ok))
-stopifnot(isFALSE(ev("45.4", "", "22", type = "Percentage")$ok))
+stopifnot(isTRUE(evaluate("45.5", "", "22", type = "Percentage")$ok))
+stopifnot(isFALSE(evaluate("45.4", "", "22", type = "Percentage")$ok))
 
 # Uninformative GRIM: N * items >= 10^digits
 stopifnot(
-  isTRUE(ev("5.2", "", "10")$uninformative),
-  isFALSE(ev("5.2", "", "9")$uninformative),
-  isTRUE(ev("5.23", "", "10", items = 10)$uninformative),
-  isTRUE(ev("45.5", "", "2000", type = "Percentage")$uninformative),
-  isFALSE(ev("45.5", "", "200", type = "Percentage")$uninformative),
-  isFALSE(isTRUE(ev("5.2", "", "10", integer = FALSE)$uninformative))
+  isTRUE(evaluate("5.2", "", "10")$uninformative),
+  isFALSE(evaluate("5.2", "", "9")$uninformative),
+  isTRUE(evaluate("5.23", "", "10", items = 10)$uninformative),
+  isTRUE(evaluate("45.5", "", "2000", type = "Percentage")$uninformative),
+  isFALSE(evaluate("45.5", "", "200", type = "Percentage")$uninformative),
+  isFALSE(isTRUE(evaluate("5.2", "", "10", integer = FALSE)$uninformative))
 )
 
 # An internal failure is reported, not swallowed
 real_grim <- grim
 grim <- function(...) stop("boom")
-r <- ev("5.20", "", "30")
+r <- evaluate("5.20", "", "30")
 stopifnot(is.na(r$ok), grepl("Internal error: boom", r$err))
 grim <- real_grim
 rm(real_grim)
@@ -58,7 +58,7 @@ for (i in 1:2000) {
   hi <- lo + sample(1:10, 1)
   prob <- if (runif(1) < .4) c(20, rep(1, hi - lo)) else NULL
   d <- rowMeans(matrix(sample(lo:hi, n * it, TRUE, prob = prob), n))
-  r <- ev(
+  r <- evaluate(
     formatC(mean(d), format = "f", digits = sample(1:2, 1)),
     formatC(sd(d), format = "f", digits = sample(1:2, 1)),
     as.character(n),
@@ -80,70 +80,96 @@ for (i in 1:2000) {
 # Bounds ---------------------------------------------------------------------
 
 # One 1 among 24 zeros: mean 0.04 -> "0.0", SD 0.2. Possible.
-stopifnot(isTRUE(ev("0.0", "0.2", "25", min = "0", max = "1")$ok))
+stopifnot(isTRUE(evaluate("0.0", "0.2", "25", min = "0", max = "1")$ok))
 # All values identical: SD 0 is possible.
-stopifnot(isTRUE(ev("3.00", "0.00", "20", min = "1", max = "5")$ok))
+stopifnot(isTRUE(evaluate("3.00", "0.00", "20", min = "1", max = "5")$ok))
 # Genuinely impossible SD and mean are still caught.
 stopifnot(identical(
-  ev("3.0", "2.5", "20", min = "1", max = "5")$reasons,
+  evaluate("3.0", "2.5", "20", min = "1", max = "5")$reasons,
   "SD exceeds Bhatia–Davis bound"
 ))
 stopifnot(identical(
-  ev("1.0", "0.9", "20", min = "1", max = "5")$reasons,
+  evaluate("1.0", "0.9", "20", min = "1", max = "5")$reasons,
   "SD exceeds Bhatia–Davis bound"
 ))
 stopifnot(
-  "Mean out of bounds" %in% ev("5.2", "", "20", min = "1", max = "5")$reasons
+  "Mean out of bounds" %in%
+    evaluate("5.2", "", "20", min = "1", max = "5")$reasons
 )
-stopifnot(isTRUE(ev("5.0", "", "20", min = "1", max = "5")$ok))
+stopifnot(isTRUE(evaluate("5.0", "", "20", min = "1", max = "5")$ok))
 # Without the integer flag, Bounds still run and the note says so.
-r <- ev("3.0", "", "20", min = "1", max = "5", integer = FALSE)
+r <- evaluate("3.0", "", "20", min = "1", max = "5", integer = FALSE)
 stopifnot(
   isTRUE(r$ok),
   identical(r$tests_run, "Bounds"),
   grepl("Bounds only", r$notes)
 )
 
+# Without N, skipped tests are named instead of passing silently.
+r <- evaluate("3.0", "2.5", "", min = "1", max = "5")
+stopifnot(
+  isTRUE(r$ok),
+  identical(r$tests_run, "Bounds"),
+  identical(r$notes, "Mean bounds only; GRIM/GRIMMER and SD bound need N")
+)
+stopifnot(
+  identical(
+    evaluate("3.45", "", "", min = "1", max = "5")$notes,
+    "Bounds only; GRIM/GRIMMER need N"
+  ),
+  identical(evaluate("3.45")$notes, "Awaiting N for GRIM/GRIMMER"),
+  identical(evaluate("", "1.2", "30")$notes, "Awaiting mean"),
+  identical(
+    evaluate("3.0", "2.5", "", min = "1", max = "5", integer = FALSE)$notes,
+    c("Mean bounds only; GRIM/GRIMMER need integer data", "SD bound needs N")
+  )
+)
+
 # Input validation -----------------------------------------------------------
 
-err <- function(...) ev(...)$err
+validation_error <- function(...) evaluate(...)$err
 stopifnot(
-  identical(err("Inf", "", "20"), "Mean must be a number"),
-  identical(err("0x10", "", "20"), "Mean must be a number"),
-  identical(err("1e1", "", "20"), "Mean must be a number"),
+  identical(validation_error("Inf", "", "20"), "Mean must be a number"),
+  identical(validation_error("0x10", "", "20"), "Mean must be a number"),
+  identical(validation_error("1e1", "", "20"), "Mean must be a number"),
   identical(
-    err("5.2", "Inf", "20", min = "1", max = "7"),
+    validation_error("5.2", "Inf", "20", min = "1", max = "7"),
     "SD must be a number"
   ),
-  identical(err("5.2", "-1.2", "20"), "SD cannot be negative"),
-  identical(err("5.2", "", "20.5"), "N must be a whole number"),
-  identical(err("5.2", "", "10000000000"), "N is too large"),
+  identical(validation_error("5.2", "-1.2", "20"), "SD cannot be negative"),
+  identical(validation_error("5.2", "", "20.5"), N_FORMAT_MSG),
+  # Separators are ambiguous across locales and would otherwise read as N = 2
+  identical(validation_error("5.21", "", "2,000"), N_FORMAT_MSG),
+  identical(validation_error("5.21", "", "2.000"), N_FORMAT_MSG),
+  identical(validation_error("5.2", "", "10000000000"), "N is too large"),
   identical(
-    err("5.2", "", "20", items = NA),
+    validation_error("5.2", "", "20", items = NA),
     "Items must be a positive whole number"
   ),
   identical(
-    err("150", "", "20", type = "Percentage"),
+    validation_error("150", "", "20", type = "Percentage"),
     "Percentage must be between 0 and 100"
   ),
   identical(
-    err("5.2", "", "20", min = "7", max = "1"),
+    validation_error("5.2", "", "20", min = "7", max = "1"),
     "Max must be greater than Min"
   ),
-  is.null(err("5,20", "2,54", "30")),
-  is.null(err("-.5", "", "30"))
+  is.null(validation_error("5,20", "2,54", "30")),
+  is.null(validation_error("-.5", "", "30"))
 )
 
 # t-test recalculation ---------------------------------------------------------
 
-tt <- function(..., p = "", op = "equals") evaluate_pair_ttest(..., p, op)
-r <- tt("5.23", "2.1", "30", "4.10", "1.9", "30", p = "0.03")
+run_t_test <- function(..., p = "", op = "equals") {
+  evaluate_pair_t_test(..., p, op)
+}
+r <- run_t_test("5.23", "2.1", "30", "4.10", "1.9", "30", p = "0.03")
 stopifnot(r$status == "ok", isTRUE(r$inbounds), isFALSE(r$mixed_digits))
 stopifnot(isFALSE(
-  tt("5.23", "2.1", "30", "4.10", "1.9", "30", p = "0.30")$inbounds
+  run_t_test("5.23", "2.1", "30", "4.10", "1.9", "30", p = "0.30")$inbounds
 ))
 stopifnot(isTRUE(
-  tt(
+  run_t_test(
     "5.23",
     "2.1",
     "30",
@@ -155,7 +181,7 @@ stopifnot(isTRUE(
   )$inbounds
 ))
 stopifnot(isFALSE(
-  tt(
+  run_t_test(
     "5.23",
     "2.1",
     "30",
@@ -170,7 +196,7 @@ stopifnot(isFALSE(
 # Mixed precision: a true m1 of 5.16 is reported as "5.2" and gives p = .045,
 # which must be inside the range.
 p_true <- 2 * pt(-abs((5.16 - 4.10) / sqrt(2.1^2 / 30 + 1.9^2 / 30)), 58)
-r <- tt("5.2", "2.1", "30", "4.10", "1.9", "30", p = "0.045")
+r <- run_t_test("5.2", "2.1", "30", "4.10", "1.9", "30", p = "0.045")
 stopifnot(
   isTRUE(r$mixed_digits),
   r$min_p < p_true,
@@ -178,8 +204,8 @@ stopifnot(
   isTRUE(r$inbounds)
 )
 # The coarse range contains the fine one, including at an exact half (4.15).
-fine <- tt("5.20", "2.10", "30", "4.15", "1.90", "30")
-coarse <- tt("5.2", "2.1", "30", "4.15", "1.90", "30")
+fine <- run_t_test("5.20", "2.10", "30", "4.15", "1.90", "30")
+coarse <- run_t_test("5.2", "2.1", "30", "4.15", "1.90", "30")
 stopifnot(coarse$min_p <= fine$min_p, coarse$max_p >= fine$max_p)
 stopifnot(
   identical(coarsen(4.15, 1), c(4.1, 4.2)),
@@ -187,25 +213,26 @@ stopifnot(
 )
 
 stopifnot(
-  tt("5.23", "2.1", "30.9", "4.10", "1.9", "30")$msg ==
-    "N must be a whole number in both groups",
-  tt("abc", "2.1", "30", "4.10", "1.9", "30")$msg ==
-    "Mean, SD and N must be numbers",
-  tt("5.23", "-2.1", "30", "4.10", "1.9", "30")$msg == "SD cannot be negative",
-  tt("5.23", "2.1", "30", "4.10", "1.9", "30", p = "1.5")$msg ==
+  run_t_test("5.23", "2.1", "30.9", "4.10", "1.9", "30")$msg == N_FORMAT_MSG,
+  run_t_test("5.23", "2.1", "30", "4.10", "1.9", "2,000")$msg == N_FORMAT_MSG,
+  run_t_test("abc", "2.1", "30", "4.10", "1.9", "30")$msg ==
+    "Mean and SD must be numbers",
+  run_t_test("5.23", "-2.1", "30", "4.10", "1.9", "30")$msg ==
+    "SD cannot be negative",
+  run_t_test("5.23", "2.1", "30", "4.10", "1.9", "30", p = "1.5")$msg ==
     "Reported p must be between 0 and 1",
-  tt("5.23", "0.0", "30", "4.10", "1.9", "30")$status == "ok",
-  tt("5.23", "", "30", "4.10", "1.9", "30")$status == "incomplete",
-  tt("", "", "", "", "", "")$status == "blank"
+  run_t_test("5.23", "0.0", "30", "4.10", "1.9", "30")$status == "ok",
+  run_t_test("5.23", "", "30", "4.10", "1.9", "30")$status == "incomplete",
+  run_t_test("", "", "", "", "", "")$status == "blank"
 )
 
 stopifnot(
-  fmt_p(0.0004) == "<0.001",
-  fmt_p(0.0006) == "0.001",
-  fmt_p(0.9994) == "0.999",
-  fmt_p(0.9996) == ">0.999",
-  fmt_p(1) == "1.000",
-  fmt_p(0) == "<0.001"
+  format_p_value(0.0004) == "<0.001",
+  format_p_value(0.0006) == "0.001",
+  format_p_value(0.9994) == "0.999",
+  format_p_value(0.9996) == ">0.999",
+  format_p_value(1) == "1.000",
+  format_p_value(0) == "<0.001"
 )
 
 # Server: row order, type/bounds sync, CSV --------------------------------------
