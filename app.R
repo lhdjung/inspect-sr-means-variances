@@ -21,28 +21,35 @@ parse_number <- function(s) {
   if (is.null(s)) {
     return(NA_real_)
   }
-  s <- gsub(",", ".", trimws(s))
+  s <- trimws(s)
   # Plain decimal notation only. as.numeric() alone would also accept "Inf",
   # hex ("0x10") and exponents, none of which is a reported summary statistic
-  # with countable decimal places.
+  # with countable decimal places. Commas are rejected too; see comma_msg().
   if (!grepl("^[+-]?([0-9]+\\.?[0-9]*|\\.[0-9]+)$", s)) {
     return(NA_real_)
   }
   as.numeric(s)
 }
 
+# A comma is a thousands separator in some locales ("1,234" = 1234) and a
+# decimal separator in others (= 1.234), so it is rejected rather than guessed.
+has_comma <- function(s) !is.null(s) && grepl(",", s, fixed = TRUE)
+
+comma_msg <- function(field) {
+  paste0(
+    field,
+    " contains a comma, which is ambiguous: use a decimal point and no",
+    " thousands separators (e.g., 1234.5)"
+  )
+}
+
 # N is checked on the string, digits only: a separator is ambiguous across
-# locales ("2,000" and "2.000" each mean 2 in some and 2000 in others), and
-# parse_number() would read both as 2.
+# locales ("2,000" and "2.000" each mean 2 in some and 2000 in others).
 is_plain_whole_number <- function(s) grepl("^[0-9]+$", trimws(s))
 
 N_FORMAT_MSG <- "N must be a whole number without separators (e.g., 2000)"
 
-# scrutiny counts decimals after a single separator, but the app accepts both
-# a decimal point and a decimal comma, as parse_number() does.
-count_decimal_places <- function(s) {
-  decimal_places_scalar(gsub(",", ".", s))
-}
+count_decimal_places <- decimal_places_scalar
 
 safe_grim <- function(x_str, n_str, items, percent = FALSE) {
   x <- parse_number(x_str)
@@ -104,12 +111,11 @@ safe_grimmer <- function(x_str, sd_str, n_str, items) {
 safe_bounds <- function(x_str, sd_str, n_str, min_str, max_str) {
   min_given <- !is.null(min_str) && nzchar(trimws(min_str))
   max_given <- !is.null(max_str) && nzchar(trimws(max_str))
-  if (!min_given || !max_given) {
-    return(character(0))
-  }
+  # A single bound still limits the mean from one side; the missing one is
+  # infinite. The SD bound below needs both.
   x <- parse_number(x_str)
-  mn <- parse_number(min_str)
-  mx <- parse_number(max_str)
+  mn <- if (min_given) parse_number(min_str) else -Inf
+  mx <- if (max_given) parse_number(max_str) else Inf
   reasons <- character(0)
   if (anyNA(c(x, mn, mx))) {
     return(reasons)
@@ -130,7 +136,7 @@ safe_bounds <- function(x_str, sd_str, n_str, min_str, max_str) {
   if (sd_given) {
     sd <- parse_number(sd_str)
     n <- suppressWarnings(as.integer(parse_number(n_str)))
-    if (!anyNA(c(sd, n)) && n >= 2 && mx > mn) {
+    if (!anyNA(c(sd, n)) && n >= 2 && min_given && max_given && mx >= mn) {
       # Bhatia–Davis upper bound on the variance for data confined to
       # [min, max] with mean m: (max - m) * (m - min), times n / (n - 1) for
       # the sample variance. It is largest at the midpoint of the scale, so
@@ -211,6 +217,10 @@ validate_combined_row <- function(
   min_str = NULL,
   max_str = NULL
 ) {
+  fields <- list(Mean = x_str, SD = sd_str, Min = min_str, Max = max_str)
+  for (field in names(fields)) {
+    if (has_comma(fields[[field]])) return(comma_msg(field))
+  }
   if (!is.null(x_str) && nzchar(trimws(x_str))) {
     x_num <- parse_number(x_str)
     if (is.na(x_num)) {
@@ -263,8 +273,10 @@ validate_combined_row <- function(
   if (min_given && max_given) {
     mn <- parse_number(min_str)
     mx <- parse_number(max_str)
-    if (!is.na(mn) && !is.na(mx) && mx <= mn) {
-      return("Max must be greater than Min")
+    # Max == Min is allowed: with empirical bounds, it means all values are
+    # identical.
+    if (!is.na(mn) && !is.na(mx) && mx < mn) {
+      return("Max cannot be less than Min")
     }
   }
   NULL
@@ -350,7 +362,8 @@ evaluate_row_unsafe <- function(
   is_percent <- isTRUE(type == "Percentage")
   min_given <- !is.null(min_str) && nzchar(trimws(min_str))
   max_given <- !is.null(max_str) && nzchar(trimws(max_str))
-  bounds_active <- min_given && max_given
+  bounds_active <- min_given || max_given
+  both_bounds <- min_given && max_given
 
   reasons <- character(0)
   tests_run <- character(0)
@@ -400,8 +413,14 @@ evaluate_row_unsafe <- function(
   # a "Consistent" here covers only the checks named. Without N, the
   # Bhatia–Davis SD bound is skipped too, leaving just the mean's bounds.
   n_given <- !is.null(n_str) && nzchar(trimws(n_str))
-  sd_bound_skipped <- bounds_active && sd_given && !n_given
-  scope <- if (sd_bound_skipped) "Mean bounds only" else "Bounds only"
+  sd_bound_skipped <- both_bounds && sd_given && !n_given
+  scope <- if (!both_bounds) {
+    "Mean bound only"
+  } else if (sd_bound_skipped) {
+    "Mean bounds only"
+  } else {
+    "Bounds only"
+  }
   if (!isTRUE(integer)) {
     notes <- c(
       notes,
@@ -424,6 +443,17 @@ evaluate_row_unsafe <- function(
           if (sd_bound_skipped) " and SD bound",
           " need N"
         )
+      }
+    )
+  }
+
+  if (bounds_active && !both_bounds) {
+    notes <- c(
+      notes,
+      if (min_given) {
+        "Only Min given; add Max for a more informative bounds check"
+      } else {
+        "Only Max given; add Min for a more informative bounds check"
       }
     )
   }
@@ -485,6 +515,9 @@ evaluate_pair_t_test <- function(
   # A reported p outside [0, 1] is invalid regardless of whether the group
   # statistics are complete, so flag it before the completeness checks below.
   if (!is.null(p_str) && nzchar(trimws(p_str))) {
+    if (has_comma(p_str)) {
+      return(list(status = "error", msg = comma_msg("Reported p")))
+    }
     p_check <- parse_number(p_str)
     if (is.na(p_check)) {
       return(list(status = "error", msg = "Reported p must be a number"))
@@ -513,6 +546,9 @@ evaluate_pair_t_test <- function(
   n1 <- parse_number(n1s)
   n2 <- parse_number(n2s)
 
+  if (has_comma(paste(m1s, sd1s, m2s, sd2s))) {
+    return(list(status = "error", msg = comma_msg("Mean or SD")))
+  }
   if (anyNA(c(m1, m2, sd1, sd2))) {
     return(list(status = "error", msg = "Mean and SD must be numbers"))
   }
@@ -1634,7 +1670,9 @@ ui <- page_navbar(
             "Bounds inputs (i.e., \"Logical Min (optional)\" and \"Logical Max (optional)\")",
             "are optional. They enable two additional checks: (a) the mean",
             " must lie inside [Logical Min, Logical Max]; (b) the SD must",
-            " not exceed the Bhatia–Davis upper bound. When \"Type\" is set to \"Percentage\"",
+            " not exceed the Bhatia–Davis upper bound. If only one of the two",
+            " is entered, the mean is checked against that bound alone and a",
+            " note says so; check (b) needs both. When \"Type\" is set to \"Percentage\"",
             "and an SD is provided, \"Logical Min\" and \"Logical Max\" are required",
             " (typically 0 and 100), and GRIMMER is not run.",
             br(),
@@ -1650,7 +1688,9 @@ ui <- page_navbar(
             "bound need the sample size; without it, only the mean's bounds",
             "are checked. A note next to the result names any skipped tests.",
             "Enter N as plain digits, without separators (e.g., 2000, not",
-            "2,000).",
+            "2,000). Commas are not accepted in any number, because they",
+            "mean thousands in some countries and decimals in others: always",
+            "use a decimal point and no thousands separators (e.g., 1234.5).",
             br(),
             br(),
             "Click \"Download CSV\" to get all the results in a tabular file."

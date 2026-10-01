@@ -125,6 +125,36 @@ stopifnot(
   )
 )
 
+# A single bound still checks the mean, and a note asks for the other one.
+r <- evaluate("7.2", "9.9", "20", max = "5")
+stopifnot(
+  identical(r$reasons, "Mean out of bounds"),
+  identical(r$notes, "Only Max given; add Min for a more informative bounds check")
+)
+r <- evaluate("3.0", "", "", min = "1")
+stopifnot(
+  isTRUE(r$ok),
+  identical(r$tests_run, "Bounds"),
+  identical(
+    r$notes,
+    c(
+      "Mean bound only; GRIM/GRIMMER need N",
+      "Only Min given; add Max for a more informative bounds check"
+    )
+  )
+)
+stopifnot(isFALSE(evaluate("0.2", "", "", min = "1", integer = FALSE)$ok))
+
+# Max == Min is allowed (all values identical): the SD must then round to 0.
+stopifnot(
+  isTRUE(evaluate("3.0", "0.0", "20", min = "3", max = "3")$ok),
+  identical(
+    evaluate("3.0", "0.5", "20", min = "3", max = "3")$reasons,
+    "SD exceeds Bhatia–Davis bound"
+  ),
+  "Mean out of bounds" %in% evaluate("3.4", "", "20", min = "3", max = "3")$reasons
+)
+
 # Input validation -----------------------------------------------------------
 
 validation_error <- function(...) evaluate(...)$err
@@ -152,9 +182,12 @@ stopifnot(
   ),
   identical(
     validation_error("5.2", "", "20", min = "7", max = "1"),
-    "Max must be greater than Min"
+    "Max cannot be less than Min"
   ),
-  is.null(validation_error("5,20", "2,54", "30")),
+  # Commas are ambiguous (thousands or decimals) and rejected everywhere
+  identical(validation_error("1,234", "", "20"), comma_msg("Mean")),
+  identical(validation_error("5.20", "2,54", "30"), comma_msg("SD")),
+  identical(validation_error("5.2", "", "20", max = "7,0"), comma_msg("Max")),
   is.null(validation_error("-.5", "", "30"))
 )
 
@@ -217,6 +250,10 @@ stopifnot(
   run_t_test("5.23", "2.1", "30", "4.10", "1.9", "2,000")$msg == N_FORMAT_MSG,
   run_t_test("abc", "2.1", "30", "4.10", "1.9", "30")$msg ==
     "Mean and SD must be numbers",
+  run_t_test("5,23", "2.1", "30", "4.10", "1.9", "30")$msg ==
+    comma_msg("Mean or SD"),
+  run_t_test("5.23", "2.1", "30", "4.10", "1.9", "30", p = "0,03")$msg ==
+    comma_msg("Reported p"),
   run_t_test("5.23", "-2.1", "30", "4.10", "1.9", "30")$msg ==
     "SD cannot be negative",
   run_t_test("5.23", "2.1", "30", "4.10", "1.9", "30", p = "1.5")$msg ==
