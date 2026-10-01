@@ -14,6 +14,16 @@ addResourcePath("images", "images")
 MAX_PAIRS <- 15
 MAX_ROWS <- 15
 
+# Each Type label states what it assumes about the raw data, so that GRIM and
+# GRIMMER only run when the user picks one of the two whole-number options.
+# "Any mean" is the default: when unsure, only the bounds are checked.
+TYPE_CHOICES <- c(
+  "Any mean" = "Any mean",
+  "Mean of whole numbers (e.g. 1–7 scale)" = "Whole-number mean",
+  "% from yes/no count" = "Percentage"
+)
+ANY_MEAN_NOTE <- "GRIM/GRIMMER not run for \"Any mean\""
+
 
 # Helpers -----------------------------------------------------------------
 
@@ -321,8 +331,7 @@ evaluate_row_unsafe <- function(
   items,
   type,
   min_str,
-  max_str,
-  integer = TRUE
+  max_str
 ) {
   if (is.null(x_str) || !nzchar(trimws(x_str))) {
     # Min and Max are left out: Percentage auto-fills them.
@@ -360,6 +369,7 @@ evaluate_row_unsafe <- function(
 
   sd_given <- !is.null(sd_str) && nzchar(trimws(sd_str))
   is_percent <- isTRUE(type == "Percentage")
+  integer <- isTRUE(type %in% c("Whole-number mean", "Percentage"))
   min_given <- !is.null(min_str) && nzchar(trimws(min_str))
   max_given <- !is.null(max_str) && nzchar(trimws(max_str))
   bounds_active <- min_given || max_given
@@ -370,10 +380,10 @@ evaluate_row_unsafe <- function(
   notes <- character(0)
   uninformative <- FALSE
 
-  # GRIM and GRIMMER are only valid for integer data. When the data are not
-  # flagged as integer, skip them and say so; the Bounds checks (mean within
+  # GRIM and GRIMMER are only valid for integer data. For "Any mean", skip
+  # them and say so; the Bounds checks (mean within
   # [min, max] and the Bhatia–Davis SD bound) still apply to continuous data.
-  if (isTRUE(integer)) {
+  if (integer) {
     grim_label <- if (is_percent) "Percentage fails GRIM" else "Mean fails GRIM"
     grim_ok <- safe_grim(x_str, n_str, items, percent = is_percent)
     if (!is.na(grim_ok)) {
@@ -421,13 +431,13 @@ evaluate_row_unsafe <- function(
   } else {
     "Bounds only"
   }
-  if (!isTRUE(integer)) {
+  if (!integer) {
     notes <- c(
       notes,
       if (length(tests_run) == 0) {
-        "GRIM/GRIMMER only apply to integer data"
+        ANY_MEAN_NOTE
       } else {
-        paste0(scope, "; GRIM/GRIMMER need integer data")
+        paste0(scope, "; ", ANY_MEAN_NOTE)
       },
       if (sd_bound_skipped) "SD bound needs N"
     )
@@ -701,7 +711,7 @@ result_ui <- function(
   })
 
   # NA = no pass/fail decision (nothing testable). Still surface any notes,
-  # e.g. the "GRIM/GRIMMER only apply to integer data" message.
+  # e.g. the ANY_MEAN_NOTE message.
   if (is.na(ok)) {
     if (length(note_spans) == 0) {
       return(span())
@@ -923,6 +933,21 @@ remove_button <- function(id) {
   )
 }
 
+# Shown under "Key assumptions" on both input tabs.
+type_assumption <- tagList(
+  "3. Choose the ",
+  tags$em("Type"),
+  " carefully. Choose ",
+  tags$em("Mean of whole numbers"),
+  " only if every single value in the raw data was a whole number (e.g., answers on a 1–7 scale, counts, age in years). Choose ",
+  tags$em("% from yes/no count"),
+  " only if the percentage is a count divided by the ",
+  tags$em("Sample size"),
+  " you enter (e.g., 10 of 22 people = 45.5%) – not a weighted percentage and not an average of percentages. If unsure, choose ",
+  tags$em("Any mean"),
+  ": then GRIM and GRIMMER are skipped and only the bounds are checked."
+)
+
 items_input <- function(id) {
   numericInput(id, NULL, value = 1, min = 1, step = 1, width = "100%")
 }
@@ -936,9 +961,10 @@ row_data_cells <- function(rid) {
       selectInput(
         paste0("cb_type_", rid),
         NULL,
-        choices = c("Mean", "Percentage"),
-        selected = "Mean",
-        width = "100%"
+        choices = TYPE_CHOICES,
+        selected = "Any mean",
+        width = "100%",
+        selectize = FALSE
       )
     ),
     div(
@@ -1011,10 +1037,6 @@ combined_pair <- function(p) {
         )
       ),
       div(
-        class = "grid-cell int-cell",
-        checkboxInput(paste0("cb_int_", p), NULL, value = FALSE)
-      ),
-      div(
         class = "grid-cell",
         textInput(
           paste0("cb_grp_", rid_a),
@@ -1037,7 +1059,8 @@ combined_pair <- function(p) {
             ">=" = "greater_than_or_equal_to"
           ),
           selected = "equals",
-          width = "100%"
+          width = "100%",
+          selectize = FALSE
         )
       ),
       div(
@@ -1063,7 +1086,6 @@ combined_pair <- function(p) {
       id = paste0("cb_slot_", p, "b"),
       class = "cb-row pair-end",
       style = shown,
-      div(class = "grid-cell"),
       div(class = "grid-cell"),
       div(
         class = "grid-cell",
@@ -1093,7 +1115,6 @@ combined_pair <- function(p) {
 combined_header <- div(
   class = "cb-row cb-header",
   div(class = "grid-hdr", "Label (optional)"),
-  div(class = "grid-hdr", "Integer data"),
   div(class = "grid-hdr", "Group (optional)"),
   div(class = "grid-hdr", "Type"),
   div(class = "grid-hdr", "Mean or percentage"),
@@ -1130,17 +1151,14 @@ single_row <- function(id) {
       )
     ),
     div(
-      class = "grid-cell int-cell",
-      checkboxInput(paste0("gb_int_", id), NULL, value = FALSE)
-    ),
-    div(
       class = "grid-cell",
       selectInput(
         paste0("gb_type_", id),
         NULL,
-        choices = c("Mean", "Percentage"),
-        selected = "Mean",
-        width = "100%"
+        choices = TYPE_CHOICES,
+        selected = "Any mean",
+        width = "100%",
+        selectize = FALSE
       )
     ),
     div(
@@ -1200,7 +1218,6 @@ single_row <- function(id) {
 single_header <- div(
   class = "sg-row sg-header",
   div(class = "grid-hdr", "Label (optional)"),
-  div(class = "grid-hdr", "Integer data"),
   div(class = "grid-hdr", "Type"),
   div(class = "grid-hdr", "Mean or percentage"),
   div(class = "grid-hdr", "SD (optional)"),
@@ -1344,10 +1361,10 @@ custom_css <- tags$style(HTML(
   .combined-grid-wrap { overflow-x: auto; }
   .combined-grid {
     display: grid;
-    grid-template-columns: 120px 80px 110px 115px 100px 80px 75px 100px 90px 90px 80px 90px minmax(200px, 1.1fr) minmax(260px, 1.5fr) auto;
+    grid-template-columns: 120px 110px 320px 100px 80px 75px 100px 90px 90px 80px 90px minmax(200px, 1.1fr) minmax(260px, 1.5fr) auto;
     column-gap: .5rem;
     row-gap: 0;
-    min-width: 1728px;
+    min-width: 1853px;
     padding-right: 1.25rem;
   }
   .combined-grid > div {
@@ -1364,7 +1381,7 @@ custom_css <- tags$style(HTML(
   .single-grid-wrap { overflow-x: auto; }
   .single-grid {
     display: grid;
-    grid-template-columns: 120px 80px 140px 110px 100px 100px 80px 150px 150px minmax(280px, 1.6fr) auto;
+    grid-template-columns: 120px 320px 110px 100px 100px 80px 100px 100px minmax(280px, 1.6fr) auto;
     column-gap: .5rem;
     row-gap: 0;
     min-width: 1418px;
@@ -1378,10 +1395,6 @@ custom_css <- tags$style(HTML(
   .single-grid > div.sg-header { align-items: end; }
 
   .grid-cell { padding: 2px 0; }
-  .int-cell { display: flex; align-items: center; justify-content: center; }
-  .int-cell .form-group, .int-cell .checkbox, .int-cell .shiny-input-container { margin: 0 !important; min-height: 0 !important; }
-  .int-cell .form-check { margin: 0 !important; min-height: 0 !important; padding-left: 0 !important; }
-  .int-cell input[type=checkbox] { margin: 0 !important; float: none !important; width: 18px; height: 18px; cursor: pointer; }
   .grid-hdr {
     padding: 4px 0 2px;
     font-size: .8rem;
@@ -1450,7 +1463,10 @@ ui <- page_navbar(
             tags$em("Logical Min"),
             " and ",
             tags$em("Logical Max"),
-            " should be set to the scale's logical min and max, not the observed min and max in the data."
+            " should be set to the scale's logical min and max, not the observed min and max in the data.",
+            br(),
+            br(),
+            type_assumption
           ),
           div(
             class = "single-grid-wrap",
@@ -1488,7 +1504,7 @@ ui <- page_navbar(
     "GRIM / GRIMMER / Bounds / t-test p value",
     div(
       class = "container py-4",
-      style = "max-width:1800px;",
+      style = "max-width:1900px;",
       card(
         card_header("GRIM, GRIMMER, Bounds and t-test Recalculation"),
         card_body(
@@ -1514,7 +1530,10 @@ ui <- page_navbar(
             tags$em("Logical Min"),
             " and ",
             tags$em("Logical Max"),
-            " should be set to the scale's logical min and max, not the observed min and max in the data."
+            " should be set to the scale's logical min and max, not the observed min and max in the data.",
+            br(),
+            br(),
+            type_assumption
           ),
           div(
             class = "combined-grid-wrap",
@@ -1672,19 +1691,26 @@ ui <- page_navbar(
             " must lie inside [Logical Min, Logical Max]; (b) the SD must",
             " not exceed the Bhatia–Davis upper bound. If only one of the two",
             " is entered, the mean is checked against that bound alone and a",
-            " note says so; check (b) needs both. When \"Type\" is set to \"Percentage\"",
+            " note says so; check (b) needs both. When \"Type\" is set to \"% from yes/no count\"",
             "and an SD is provided, \"Logical Min\" and \"Logical Max\" are required",
             " (typically 0 and 100), and GRIMMER is not run.",
             br(),
             br(),
-            tags$strong("Integer data:"),
+            tags$strong("Type:"),
             "GRIM and GRIMMER are only valid if the underlying data are whole",
             "numbers (e.g., Likert responses, counts, age in years). They are",
-            "therefore only run when you tick the",
-            tags$em("Integer data"),
-            "box, which is unticked by default. Without it, only the Bounds",
-            "checks are run, so a \"Consistent\" result then refers to the",
-            "bounds alone. Likewise, GRIM, GRIMMER and the Bhatia–Davis SD",
+            "therefore only run if you set",
+            tags$em("Type"),
+            "to",
+            tags$em("Mean of whole numbers"),
+            "or",
+            tags$em("% from yes/no count", .noWS = "after"),
+            ". The latter means a count of people (or answers) divided by the",
+            "sample size, without weighting; it does not cover averages of",
+            "percentages, such as a mean percent score. The default,",
+            tags$em("Any mean", .noWS = "after"),
+            ", only runs the Bounds checks, so a \"Consistent\" result then",
+            "refers to the bounds alone. Likewise, GRIM, GRIMMER and the Bhatia–Davis SD",
             "bound need the sample size; without it, only the mean's bounds",
             "are checked. A note next to the result names any skipped tests.",
             "Enter N as plain digits, without separators (e.g., 2000, not",
@@ -1875,7 +1901,7 @@ ui <- page_navbar(
 
 server <- function(input, output, session) {
   # Percentages default to bounds of 0 and 100. Remember which cells were
-  # auto-filled so that switching back to "Mean" removes them again instead of
+  # auto-filled so that switching to a mean type removes them again instead of
   # silently applying percentage bounds to a mean. `prefix` is "gb_" or "cb_";
   # `rid` is the row id stem.
   sync_type_bounds <- function(prefix, rid) {
@@ -1948,7 +1974,6 @@ server <- function(input, output, session) {
           current <- gb_slots()
           if (ii %in% current) {
             updateTextInput(session, paste0("gb_var_", ii), value = "")
-            updateCheckboxInput(session, paste0("gb_int_", ii), value = FALSE)
             updateTextInput(session, paste0("gb_x_", ii), value = "")
             updateTextInput(session, paste0("gb_sd_", ii), value = "")
             updateTextInput(session, paste0("gb_n_", ii), value = "")
@@ -1958,7 +1983,7 @@ server <- function(input, output, session) {
             updateSelectInput(
               session,
               paste0("gb_type_", ii),
-              selected = "Mean"
+              selected = "Any mean"
             )
             gb_slots(setdiff(current, ii))
           }
@@ -1977,7 +2002,6 @@ server <- function(input, output, session) {
         type <- input[[paste0("gb_type_", ii)]]
         min_str <- input[[paste0("gb_min_", ii)]]
         max_str <- input[[paste0("gb_max_", ii)]]
-        integer <- isTRUE(input[[paste0("gb_int_", ii)]])
         res <- evaluate_row(
           x_str,
           sd_str,
@@ -1985,8 +2009,7 @@ server <- function(input, output, session) {
           items,
           type,
           min_str,
-          max_str,
-          integer
+          max_str
         )
         if (!is.null(res$err)) {
           return(error_ui(res$err))
@@ -2014,8 +2037,7 @@ server <- function(input, output, session) {
           input[[paste0("gb_items_", i)]],
           input[[paste0("gb_type_", i)]],
           input[[paste0("gb_min_", i)]],
-          input[[paste0("gb_max_", i)]],
-          isTRUE(input[[paste0("gb_int_", i)]])
+          input[[paste0("gb_max_", i)]]
         )$ok
       },
       logical(1)
@@ -2039,7 +2061,6 @@ server <- function(input, output, session) {
         min_str <- input[[paste0("gb_min_", i)]]
         max_str <- input[[paste0("gb_max_", i)]]
         variable <- input[[paste0("gb_var_", i)]]
-        integer <- isTRUE(input[[paste0("gb_int_", i)]])
         if (is.null(x_str) || !nzchar(trimws(x_str))) {
           return(NULL)
         }
@@ -2056,7 +2077,7 @@ server <- function(input, output, session) {
         max_given <- !is.null(max_str) && nzchar(trimws(max_str))
         # fmt: skip
         res <- evaluate_row(
-          x_str, sd_str, n_str, items, type, min_str, max_str, integer
+          x_str, sd_str, n_str, items, type, min_str, max_str
         )
         test_label <- if (length(res$tests_run) == 0) {
           ""
@@ -2083,8 +2104,7 @@ server <- function(input, output, session) {
         notes <- paste(note_parts, collapse = "; ")
         data.frame(
           label = var_val,
-          integer_data = integer,
-          type = if (is.null(type)) "Mean" else type,
+          type = if (is.null(type)) "Any mean" else type,
           mean = trimws(x_str),
           sd = if (sd_given) trimws(sd_str) else "",
           n = if (!is.null(n_str)) trimws(n_str) else "",
@@ -2102,7 +2122,6 @@ server <- function(input, output, session) {
       if (length(rows) == 0) {
         df <- data.frame(
           label = character(),
-          integer_data = logical(),
           type = character(),
           mean = character(),
           sd = character(),
@@ -2176,11 +2195,7 @@ server <- function(input, output, session) {
 
   row_result_from_inputs <- function(rid) {
     r <- read_row(rid)
-    # The Integer-data flag is per-pair; strip the trailing side letter to get
-    # the pair index (e.g. "12a" -> "12").
-    p <- substr(rid, 1, nchar(rid) - 1)
-    integer <- isTRUE(input[[paste0("cb_int_", p)]])
-    evaluate_row(r$x, r$sd, r$n, r$items, r$type, r$min, r$max, integer)
+    evaluate_row(r$x, r$sd, r$n, r$items, r$type, r$min, r$max)
   }
 
   pair_t_test_from_inputs <- function(p) {
@@ -2219,7 +2234,6 @@ server <- function(input, output, session) {
 
           output[[paste0("cb_badge_", rid)]] <- renderUI({
             r <- read_row(rid)
-            integer <- isTRUE(input[[paste0("cb_int_", pp)]])
             res <- evaluate_row(
               r$x,
               r$sd,
@@ -2227,8 +2241,7 @@ server <- function(input, output, session) {
               r$items,
               r$type,
               r$min,
-              r$max,
-              integer
+              r$max
             )
             if (!is.null(res$err)) {
               return(error_ui(res$err))
@@ -2256,7 +2269,6 @@ server <- function(input, output, session) {
           current <- pairs()
           if (pp %in% current) {
             updateTextInput(session, paste0("cb_var_", pp), value = "")
-            updateCheckboxInput(session, paste0("cb_int_", pp), value = FALSE)
             updateTextInput(session, paste0("cb_p_", pp), value = "")
             updateSelectInput(
               session,
@@ -2275,7 +2287,7 @@ server <- function(input, output, session) {
               updateSelectInput(
                 session,
                 paste0("cb_type_", rid),
-                selected = "Mean"
+                selected = "Any mean"
               )
             }
             pairs(setdiff(current, pp))
@@ -2318,7 +2330,6 @@ server <- function(input, output, session) {
       rows <- lapply(s, function(p) {
         tt <- t_test_results[[p]]()
         variable <- input[[paste0("cb_var_", p)]]
-        integer <- isTRUE(input[[paste0("cb_int_", p)]])
         p_str <- input[[paste0("cb_p_", p)]]
         pop <- input[[paste0("cb_pop_", p)]]
 
@@ -2362,7 +2373,7 @@ server <- function(input, output, session) {
           max_given <- !is.null(r$max) && nzchar(trimws(r$max))
           # fmt: skip
           res <- evaluate_row(
-            r$x, r$sd, r$n, r$items, r$type, r$min, r$max, integer
+            r$x, r$sd, r$n, r$items, r$type, r$min, r$max
           )
           test_label <- if (length(res$tests_run) == 0) {
             ""
@@ -2392,9 +2403,8 @@ server <- function(input, output, session) {
           tt_ok <- identical(tt$status, "ok")
           data.frame(
             label = if (is_first) var_val else "",
-            integer_data = integer,
             group = group_val,
-            type = if (is.null(r$type)) "Mean" else r$type,
+            type = if (is.null(r$type)) "Any mean" else r$type,
             mean = trimws(r$x),
             sd = if (sd_given) trimws(r$sd) else "",
             n = if (!is.null(r$n)) trimws(r$n) else "",
@@ -2450,7 +2460,6 @@ server <- function(input, output, session) {
       if (length(rows) == 0) {
         df <- data.frame(
           label = character(),
-          integer_data = logical(),
           group = character(),
           type = character(),
           mean = character(),

@@ -8,12 +8,13 @@ evaluate <- function(
   sd = "",
   n = "",
   items = 1,
-  type = "Mean",
+  type = "Whole-number mean",
   min = "",
   max = "",
   integer = TRUE
 ) {
-  evaluate_row(x, sd, n, items, type, min, max, integer)
+  if (!integer) type <- "Any mean"
+  evaluate_row(x, sd, n, items, type, min, max)
 }
 
 # GRIM / GRIMMER actually run and give known verdicts ----------------------
@@ -63,7 +64,7 @@ for (i in 1:2000) {
     formatC(sd(d), format = "f", digits = sample(1:2, 1)),
     as.character(n),
     it,
-    "Mean",
+    "Whole-number mean",
     as.character(lo),
     as.character(hi)
   )
@@ -97,13 +98,15 @@ stopifnot(
     evaluate("5.2", "", "20", min = "1", max = "5")$reasons
 )
 stopifnot(isTRUE(evaluate("5.0", "", "20", min = "1", max = "5")$ok))
-# Without the integer flag, Bounds still run and the note says so.
+# "Any mean" skips GRIM/GRIMMER; Bounds still run and the note says so.
 r <- evaluate("3.0", "", "20", min = "1", max = "5", integer = FALSE)
 stopifnot(
   isTRUE(r$ok),
   identical(r$tests_run, "Bounds"),
-  grepl("Bounds only", r$notes)
+  identical(r$notes, "Bounds only; GRIM/GRIMMER not run for \"Any mean\"")
 )
+# The default type runs no GRIM, even on an impossible mean.
+stopifnot(isTRUE(is.na(evaluate_row("5.21", "", "30", 1, "Any mean", "", "")$ok)))
 
 # Without N, skipped tests are named instead of passing silently.
 r <- evaluate("3.0", "2.5", "", min = "1", max = "5")
@@ -121,7 +124,7 @@ stopifnot(
   identical(evaluate("", "1.2", "30")$notes, "Awaiting mean"),
   identical(
     evaluate("3.0", "2.5", "", min = "1", max = "5", integer = FALSE)$notes,
-    c("Mean bounds only; GRIM/GRIMMER need integer data", "SD bound needs N")
+    c("Mean bounds only; GRIM/GRIMMER not run for \"Any mean\"", "SD bound needs N")
   )
 )
 
@@ -281,8 +284,7 @@ shiny::testServer(app, {
 
   session$setInputs(
     gb_var_1 = "",
-    gb_int_1 = TRUE,
-    gb_type_1 = "Mean",
+    gb_type_1 = "Whole-number mean",
     gb_x_1 = "5.2",
     gb_sd_1 = "",
     gb_n_1 = "10",
@@ -303,7 +305,7 @@ shiny::testServer(app, {
       session$setInputs,
       setNames(
         list(
-          "Mean",
+          "Any mean",
           if (rid == "1a") "" else "4.10",
           "1.9",
           "30",
@@ -322,7 +324,6 @@ shiny::testServer(app, {
   }
   session$setInputs(
     cb_var_1 = "BDI",
-    cb_int_1 = FALSE,
     cb_p_1 = "1.5",
     cb_pop_1 = "equals"
   )
