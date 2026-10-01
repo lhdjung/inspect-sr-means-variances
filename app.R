@@ -1278,10 +1278,10 @@ custom_css <- tags$style(HTML(
   .combined-grid-wrap { overflow-x: auto; }
   .combined-grid {
     display: grid;
-    grid-template-columns: 120px 80px 110px 115px 90px 80px 75px 100px 90px 90px 80px 90px minmax(200px, 1.1fr) minmax(260px, 1.5fr) auto;
+    grid-template-columns: 120px 80px 110px 115px 100px 80px 75px 100px 90px 90px 80px 90px minmax(200px, 1.1fr) minmax(260px, 1.5fr) auto;
     column-gap: .5rem;
     row-gap: 0;
-    min-width: 1718px;
+    min-width: 1728px;
     padding-right: 1.25rem;
   }
   .combined-grid > div {
