@@ -14,6 +14,9 @@ addResourcePath("images", "images")
 MAX_PAIRS <- 15
 MAX_ROWS <- 15
 
+# Bump this and add an entry to the "Changelog" tab with every deployment.
+APP_VERSION <- "0.2.0"
+
 # Each Type label states what it assumes about the raw data, so that GRIM and
 # GRIMMER only run when the user picks one of the two whole-number options.
 # "Any mean" is the default: when unsure, only the bounds are checked.
@@ -1465,7 +1468,16 @@ ui <- page_navbar(
       alt = "INSPECT-SR",
       height = "56"
     ),
-    "Consistency Tester"
+    # One inline span so the version shares the title's baseline instead of
+    # being centred as its own flex item, which made it float too high.
+    span(
+      "Consistency Tester",
+      tags$small(
+        class = "fw-normal ms-1",
+        style = "opacity:.7; font-size:.8rem;",
+        paste0("v", APP_VERSION)
+      )
+    )
   ),
   theme = bs_theme(
     bootswatch = "flatly",
@@ -1868,6 +1880,54 @@ ui <- page_navbar(
         class = "text-muted mt-3 mb-0",
         style = "font-size:.78rem; text-align:center;",
         "App by Lukas Jung and Ian Hussey, University of Bern."
+      )
+    )
+  ),
+
+  nav_panel(
+    "Changelog",
+    div(
+      class = "container py-4",
+      style = "max-width:900px;",
+      card(
+        card_header("Changelog"),
+        card_body(
+          h5("0.2.0 (2026-10-02)"),
+          p(class = "text-muted mb-2", "First numbered version."),
+          tags$ul(
+            class = "text-muted",
+            tags$li(
+              "Fixed GRIM for percentages. For some time before, there
+              could be false positive GRIM results (i.e., consistent
+              numbers declared inconsistent) because the app imputed a
+              higher degree of granularity than the true one. This is now
+              handled purely by the scrutiny package, which is correct.",
+            ),
+            tags$li(
+              "Commas and other separators in numbers are rejected because",
+              "they are ambiguous (e.g., \"2,000\"). They are read as
+              separating thousands in some countries, but as decimal
+              separators in others."
+            ),
+            tags$li(
+              "Skipped tests are named when N or the mean is missing.",
+              "This is for clarity."
+            )
+          ),
+          h5(class = "mt-4", "0.1.0 (2026-04-30)"),
+          p(
+            class = "text-muted mb-2",
+            "First release but not numbered at the time."
+          ),
+          tags$ul(
+            class = "text-muted",
+            tags$li(
+              "GRIM and GRIMMER tests for means and percentages, with",
+              "support for multi-item scales."
+            ),
+            tags$li("Guidance and About tabs.")
+          )
+        )
       )
     )
   ),
