@@ -277,6 +277,9 @@ validate_combined_row <- function(
   ) {
     return("Items must be a positive whole number")
   }
+  if (isTRUE(type == "Percentage") && items > 1) {
+    return("Percentages cannot have multiple items.")
+  }
   if (min_given && is.na(parse_number(min_str))) {
     return("Min must be a number")
   }
@@ -1912,6 +1915,10 @@ ui <- page_navbar(
             tags$li(
               "Skipped tests are named when N or the mean is missing.",
               "This is for clarity."
+            ),
+            tags$li(
+              "Percentages with more than one item are rejected because a",
+              "percentage from a yes/no count cannot be averaged over items."
             )
           ),
           h5(class = "mt-4", "0.1.0 (2026-04-30)"),
