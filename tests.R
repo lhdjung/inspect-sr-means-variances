@@ -1100,6 +1100,7 @@ shiny::testServer(app, {
   csv <- read.csv(output$gb_download, colClasses = "character")
   stopifnot(
     nrow(csv) == 1,
+    csv$app_version == APP_VERSION,
     csv$label == "1",
     csv$test == "GRIM",
     csv$consistent == "TRUE",
@@ -1202,6 +1203,7 @@ shiny::testServer(app, {
   csv <- read.csv(output$download_csv, colClasses = "character")
   stopifnot(
     nrow(csv) == 1,
+    csv$app_version == APP_VERSION,
     csv$label == "BDI",
     csv$group == "2",
     csv$reported_p == "1.5",

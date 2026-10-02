@@ -1919,6 +1919,10 @@ ui <- page_navbar(
             tags$li(
               "Percentages with more than one item are rejected because a",
               "percentage from a yes/no count cannot be averaged over items."
+            ),
+            tags$li(
+              "Downloaded CSV files have an \"app_version\" column",
+              "that says which version of the app made the file."
             )
           ),
           h5(class = "mt-4", "0.1.0 (2026-04-30)"),
@@ -2254,6 +2258,7 @@ server <- function(input, output, session) {
       } else {
         df <- do.call(rbind, rows)
       }
+      df$app_version <- rep(APP_VERSION, nrow(df))
       write.csv(df, file, row.names = FALSE)
     }
   )
@@ -2612,6 +2617,7 @@ server <- function(input, output, session) {
       } else {
         df <- do.call(rbind, rows)
       }
+      df$app_version <- rep(APP_VERSION, nrow(df))
       write.csv(df, file, row.names = FALSE)
     }
   )
