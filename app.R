@@ -3,7 +3,7 @@ library(bslib)
 library(scrutiny)
 library(recalc)
 
-# # Deploy like this:
+# # Deploy like this, after `Rscript tests.R` prints "All checks passed.":
 # rsconnect::deployApp(
 #   appName = "inspect-sr-means-variances",
 #   account = "errors"
@@ -13,6 +13,9 @@ addResourcePath("images", "images")
 
 MAX_PAIRS <- 15
 MAX_ROWS <- 15
+
+# Bump this and add an entry to the "Changelog" tab with every deployment.
+APP_VERSION <- "0.2.0"
 
 # Each Type label states what it assumes about the raw data, so that GRIM and
 # GRIMMER only run when the user picks one of the two whole-number options.
@@ -274,6 +277,9 @@ validate_combined_row <- function(
   ) {
     return("Items must be a positive whole number")
   }
+  if (isTRUE(type == "Percentage") && items > 1) {
+    return("Percentages cannot have multiple items.")
+  }
   if (min_given && is.na(parse_number(min_str))) {
     return("Min must be a number")
   }
@@ -508,7 +514,8 @@ evaluate_row_unsafe <- function(
 # - "incomplete": some but not all of M/SD/N for both groups present
 # - "error":      an explicit problem (with $msg)
 # - "ok":         recalculated (with $min_p, $max_p, $p_given, $p_reported,
-#                 $inbounds, $p_digits, $mixed_digits)
+#                 $inbounds, $p_digits, $mixed_digits, and $ranges: the
+#                 separate ranges of possible p between $min_p and $max_p)
 evaluate_pair_t_test <- function(
   m1s,
   sd1s,
@@ -597,11 +604,16 @@ evaluate_pair_t_test <- function(
   # A finer value exactly halfway between two coarser ones (4.15 at 1 decimal)
   # has a rounding interval straddling both, so every such combination is
   # recalculated and the results are pooled.
+  # recalc (0.6) skips every candidate SD that is exactly 0, which leaves only
+  # the upper end of a zero SD's rounding interval and makes the smallest
+  # recalculated p too large. A tiny positive SD stands in for the lower end.
+  # ponytail: drop nonzero() once recalc evaluates SD = 0 itself.
+  nonzero <- function(sd) pmax(sd, 1e-8)
   grid <- expand.grid(
     m1 = coarsen(m1, m_digits),
     m2 = coarsen(m2, m_digits),
-    sd1 = coarsen(sd1, sd_digits),
-    sd2 = coarsen(sd2, sd_digits)
+    sd1 = nonzero(coarsen(sd1, sd_digits)),
+    sd2 = nonzero(coarsen(sd2, sd_digits))
   )
   reps <- tryCatch(
     lapply(seq_len(nrow(grid)), function(i) {
@@ -620,7 +632,7 @@ evaluate_pair_t_test <- function(
         p_operator = p_operator,
         alternative = "two.sided",
         direction = "both"
-      ))$reproduced
+      ))
     }),
     error = function(e) {
       paste("Could not recalculate:", sub("\n.*", "", conditionMessage(e)))
@@ -629,9 +641,20 @@ evaluate_pair_t_test <- function(
   if (is.character(reps)) {
     return(list(status = "error", msg = reps))
   }
+  # Student's and Welch's tests each give their own range of possible p, and
+  # the two need not overlap. A reported p in the gap between them is not
+  # reproduced, so the ranges are kept apart instead of shown as one span.
+  ranges <- merge_ranges(
+    do.call(
+      rbind,
+      lapply(reps, function(r) r$method_intervals[c("p_min", "p_max")])
+    ),
+    p_digits
+  )
+  reps <- lapply(reps, function(r) r$reproduced)
   min_p <- min(vapply(reps, function(r) r$min_p, numeric(1)))
   max_p <- max(vapply(reps, function(r) r$max_p, numeric(1)))
-  if (anyNA(c(min_p, max_p))) {
+  if (anyNA(c(min_p, max_p)) || is.null(ranges)) {
     return(list(status = "error", msg = "Could not recalculate"))
   }
 
@@ -641,6 +664,7 @@ evaluate_pair_t_test <- function(
     p_reported = if (p_given) p_num else NA_real_,
     min_p = min_p,
     max_p = max_p,
+    ranges = ranges,
     inbounds = if (p_given) {
       any(vapply(reps, function(r) isTRUE(r$p_inbounds), logical(1)))
     } else {
@@ -653,6 +677,40 @@ evaluate_pair_t_test <- function(
 }
 
 MIXED_DIGITS_NOTE <- "Groups differ in decimal places; coarser precision used"
+
+# Merges ranges (data frame with p_min, p_max) that overlap or touch once
+# rounded to `digits`, so that only gaps visible in the display remain.
+merge_ranges <- function(ranges, digits) {
+  if (is.null(ranges) || anyNA(ranges)) {
+    return(NULL)
+  }
+  ranges <- ranges[order(ranges$p_min), ]
+  out <- ranges[1, ]
+  for (i in seq_len(nrow(ranges))[-1]) {
+    k <- nrow(out)
+    if (round(ranges$p_min[i], digits) <= round(out$p_max[k], digits)) {
+      out$p_max[k] <- max(out$p_max[k], ranges$p_max[i])
+    } else {
+      out <- rbind(out, ranges[i, ])
+    }
+  }
+  out
+}
+
+# "p ∈ [0.005, 0.019] or [0.356, 0.518]"
+p_ranges_text <- function(ranges, digits) {
+  paste0(
+    "p ∈ ",
+    paste0(
+      "[",
+      vapply(ranges$p_min, format_p_value, character(1), digits),
+      ", ",
+      vapply(ranges$p_max, format_p_value, character(1), digits),
+      "]",
+      collapse = " or "
+    )
+  )
+}
 
 # Candidate values of `v` when re-expressed at `digits` decimal places: its
 # rounded value, or both neighbours if it sits exactly halfway between them.
@@ -797,13 +855,7 @@ t_test_result_ui <- function(tt) {
   }
 
   dg <- tt$p_digits
-  range_txt <- paste0(
-    "p ∈ [",
-    format_p_value(tt$min_p, dg),
-    ", ",
-    format_p_value(tt$max_p, dg),
-    "]"
-  )
+  range_txt <- p_ranges_text(tt$ranges, dg)
   mixed_note <- if (isTRUE(tt$mixed_digits)) {
     span(
       class = "text-muted",
@@ -1419,7 +1471,16 @@ ui <- page_navbar(
       alt = "INSPECT-SR",
       height = "56"
     ),
-    "Consistency Tester"
+    # One inline span so the version shares the title's baseline instead of
+    # being centred as its own flex item, which made it float too high.
+    span(
+      "Consistency Tester",
+      tags$small(
+        class = "fw-normal ms-1",
+        style = "opacity:.7; font-size:.8rem;",
+        paste0("v", APP_VERSION)
+      )
+    )
   ),
   theme = bs_theme(
     bootswatch = "flatly",
@@ -1741,7 +1802,10 @@ ui <- page_navbar(
             " and Welch's t-tests are computed, in both effect directions. This",
             " yields a range ",
             tags$em("[min p, max p]"),
-            " rather than a single value.",
+            " rather than a single value. When Student's and Welch's tests",
+            " disagree strongly (very unequal SDs and group sizes), their",
+            " ranges do not overlap; both are then shown, and a reported p in",
+            " the gap between them is not reproduced.",
             br(),
             br(),
             "If you enter a ",
@@ -1819,6 +1883,58 @@ ui <- page_navbar(
         class = "text-muted mt-3 mb-0",
         style = "font-size:.78rem; text-align:center;",
         "App by Lukas Jung and Ian Hussey, University of Bern."
+      )
+    )
+  ),
+
+  nav_panel(
+    "Changelog",
+    div(
+      class = "container py-4",
+      style = "max-width:900px;",
+      card(
+        card_header("Changelog"),
+        card_body(
+          h5("0.2.0 (2026-10-02)"),
+          p(class = "text-muted mb-2", "First numbered version."),
+          tags$ul(
+            class = "text-muted",
+            tags$li(
+              "Fixed GRIM for percentages. For some time before, there
+              could be false positive GRIM results (i.e., consistent
+              numbers declared inconsistent) because the app imputed a
+              higher degree of granularity than the true one. This is now
+              handled purely by the scrutiny package, which is correct.",
+            ),
+            tags$li(
+              "Commas and other separators in numbers are rejected because",
+              "they are ambiguous (e.g., \"2,000\"). They are read as
+              separating thousands in some countries, but as decimal
+              separators in others."
+            ),
+            tags$li(
+              "Skipped tests are named when N or the mean is missing.",
+              "This is for clarity."
+            ),
+            tags$li(
+              "Percentages with more than one item are rejected because a",
+              "percentage from a yes/no count cannot be averaged over items."
+            )
+          ),
+          h5(class = "mt-4", "0.1.0 (2026-04-30)"),
+          p(
+            class = "text-muted mb-2",
+            "First release but not numbered at the time."
+          ),
+          tags$ul(
+            class = "text-muted",
+            tags$li(
+              "GRIM and GRIMMER tests for means and percentages, with",
+              "support for multi-item scales."
+            ),
+            tags$li("Guidance and About tabs.")
+          )
+        )
       )
     )
   ),
@@ -2441,8 +2557,21 @@ server <- function(input, output, session) {
             },
             p_note = if (is_first && identical(tt$status, "error")) {
               tt$msg
-            } else if (is_first && tt_ok && isTRUE(tt$mixed_digits)) {
-              MIXED_DIGITS_NOTE
+            } else if (is_first && tt_ok) {
+              # recalc_p_min and recalc_p_max span all ranges; name them when
+              # there is a gap, since a reported p inside it is not reproduced.
+              paste(
+                c(
+                  if (isTRUE(tt$mixed_digits)) MIXED_DIGITS_NOTE,
+                  if (nrow(tt$ranges) > 1) {
+                    paste(
+                      "Student's and Welch's t-tests give separate ranges:",
+                      p_ranges_text(tt$ranges, tt$p_digits)
+                    )
+                  }
+                ),
+                collapse = "; "
+              )
             } else {
               ""
             },
