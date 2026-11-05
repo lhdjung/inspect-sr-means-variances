@@ -15,7 +15,7 @@ MAX_PAIRS <- 15
 MAX_ROWS <- 15
 
 # Bump this and add an entry to the "Changelog" tab with every deployment.
-APP_VERSION <- "0.2.0"
+APP_VERSION <- "0.3.0"
 
 # Each Type label states what it assumes about the raw data, so that GRIM and
 # GRIMMER only run when the user picks one of the two whole-number options.
@@ -26,6 +26,15 @@ TYPE_CHOICES <- c(
   "% from yes/no count" = "Percentage"
 )
 ANY_MEAN_NOTE <- "GRIM/GRIMMER not run for \"Any mean\""
+
+# What a reported SD really is, passed to scrutiny's `sd_meaning`. One setting
+# per tab, since a study usually computes all its SDs the same way.
+SD_MEANING_CHOICES <- c(
+  "Sample SD (most common)" = "sd_sample",
+  "Population SD" = "sd_pop",
+  "Sample or population SD (unsure)" = "sd_sample_or_pop",
+  "Standard error, reported as SD" = "se"
+)
 
 
 # Helpers -----------------------------------------------------------------
@@ -62,7 +71,7 @@ is_plain_whole_number <- function(s) grepl("^[0-9]+$", trimws(s))
 
 N_FORMAT_MSG <- "N must be a whole number without separators (e.g., 2000)"
 
-count_decimal_places <- decimal_places_scalar
+count_decimal_places <- decimal_places
 
 safe_grim <- function(x_str, n_str, items, percent = FALSE) {
   x <- parse_number(x_str)
@@ -70,7 +79,7 @@ safe_grim <- function(x_str, n_str, items, percent = FALSE) {
   # grim() adds 2 to digits_x internally when percent = TRUE, so we must not add
   # it here as well: doing so would give percentages dp + 4 effective decimal
   # places, making the test wrongly strict and disagreeing with
-  # grim_uninformative() (which relies on grim_probability()'s internal +2).
+  # grim_uninformative() (which relies on grim_exp_incon()'s internal +2).
   dx <- count_decimal_places(x_str)
   it <- suppressWarnings(as.integer(items))
   if (anyNA(c(x, n, it)) || n < 2 || it < 1) {
@@ -79,7 +88,7 @@ safe_grim <- function(x_str, n_str, items, percent = FALSE) {
   # No tryCatch here or in the other test wrappers: an error means the test
   # could not be run, which evaluate_row() reports instead of silently
   # treating the row as untested.
-  grim(x = x, n = n, digits_x = dx, items = it, percent = percent)
+  grim(x = x, n = n, digits_x = dx, items_averaged = it, percent = percent)
 }
 
 grim_uninformative <- function(x_str, n_str, items, percent = FALSE) {
@@ -89,17 +98,23 @@ grim_uninformative <- function(x_str, n_str, items, percent = FALSE) {
   if (anyNA(c(x, n, it)) || n < 2 || it < 1) {
     return(FALSE)
   }
-  p <- grim_probability(
+  p <- grim_exp_incon(
     x = x,
     n = n,
     digits_x = count_decimal_places(x_str),
-    items = it,
+    items_averaged = it,
     percent = percent
   )
   isTRUE(p == 0)
 }
 
-safe_grimmer <- function(x_str, sd_str, n_str, items) {
+safe_grimmer <- function(
+  x_str,
+  sd_str,
+  n_str,
+  items,
+  sd_meaning = "sd_sample"
+) {
   x <- parse_number(x_str)
   sd <- parse_number(sd_str)
   n <- suppressWarnings(as.integer(parse_number(n_str)))
@@ -109,19 +124,58 @@ safe_grimmer <- function(x_str, sd_str, n_str, items) {
   if (anyNA(c(x, sd, n, it)) || n < 2 || it < 1) {
     return(list(ok = NA, reason = ""))
   }
-  # grimmer() itself returns a bare logical; only grimmer_map() can say which
-  # sub-test failed.
+  # grimmer() itself returns a bare logical; only grimmer_map()'s `reason`
+  # column says which sub-test failed.
   r <- grimmer_map(
     tibble::tibble(x = x, sd = sd, n = n),
     digits_x = dx,
     digits_sd = ds,
-    items = it,
-    show_reason = TRUE
+    items_averaged = it,
+    sd_meaning = sd_meaning
   )
   list(ok = as.logical(r$consistency), reason = r$reason)
 }
 
-safe_bounds <- function(x_str, sd_str, n_str, min_str, max_str) {
+# DEBIT for a percentage from a yes/no count, i.e., the mean of binary data.
+# Its SD may be reported on the scale of proportions (0.498) or of percentages
+# (49.8). The SD of binary data is fixed by the mean, so the two readings,
+# a hundredfold apart, cannot both fit unless the SD is about 0; the SD passes
+# if either does. Shifting the decimal point in the string keeps the values
+# exact at two more decimal places.
+safe_debit <- function(x_str, sd_str, n_str, sd_meaning = "sd_sample") {
+  sd <- parse_number(sd_str)
+  n <- suppressWarnings(as.integer(parse_number(n_str)))
+  if (anyNA(c(parse_number(x_str), sd, n)) || n < 2) {
+    return(NA)
+  }
+  hundredth <- function(s) as.numeric(paste0(trimws(s), "e-2"))
+  test <- function(sd, digits_sd) {
+    # debit() refuses an SD above 1; no binary SD comes close (at most about
+    # 0.71, at n = 2), so that reading is simply inconsistent.
+    if (sd > 1) {
+      return(FALSE)
+    }
+    debit(
+      x = hundredth(x_str),
+      sd = sd,
+      n = n,
+      digits_x = count_decimal_places(x_str) + 2L,
+      digits_sd = digits_sd,
+      sd_meaning = sd_meaning
+    )
+  }
+  ds <- count_decimal_places(sd_str)
+  test(sd, ds) | test(hundredth(sd_str), ds + 2L)
+}
+
+safe_bounds <- function(
+  x_str,
+  sd_str,
+  n_str,
+  min_str,
+  max_str,
+  sd_meaning = "sd_sample"
+) {
   min_given <- !is.null(min_str) && nzchar(trimws(min_str))
   max_given <- !is.null(max_str) && nzchar(trimws(max_str))
   # A single bound still limits the mean from one side; the missing one is
@@ -157,9 +211,14 @@ safe_bounds <- function(x_str, sd_str, n_str, min_str, max_str) {
       # mean lies inside [min, max], no in-range data exist at all, so no SD
       # is valid and both reasons are reported.
       m <- min(max((mn + mx) / 2, lo), hi)
-      var_max <- max((mx - m) * (m - mn), 0) * n / (n - 1)
+      # A population SD divides by n instead; "sample or population" takes
+      # the looser sample bound. A standard error is the sample SD divided by
+      # sqrt(n).
+      var_max <- max((mx - m) * (m - mn), 0) *
+        if (sd_meaning == "sd_pop") 1 else n / (n - 1)
+      se_divisor <- if (sd_meaning == "se") sqrt(n) else 1
       tol <- 0.5 * 10^(-count_decimal_places(sd_str))
-      if (mean_out || sd - tol > sqrt(var_max) + eps) {
+      if (mean_out || sd - tol > sqrt(var_max) / se_divisor + eps) {
         reasons <- c(reasons, "SD exceeds Bhatia–Davis bound")
       }
     }
@@ -172,6 +231,12 @@ friendly_reason <- function(reason) {
     return("Mean fails GRIM")
   }
   if (grepl("GRIMMER inconsistent", reason)) {
+    # Under "sample or population", both may fail differently:
+    # "Sample SD: GRIMMER inconsistent (test 1); population SD: ... (test 3)".
+    if (startsWith(reason, "Sample SD: ")) {
+      parts <- gsub("GRIMMER inconsistent \\((test \\d)\\)", "\\1", reason)
+      return(paste0("SD fails GRIMMER (", sub("^Sample", "sample", parts), ")"))
+    }
     # grimmer() reports which of its 3 sub-tests failed, e.g.
     # "GRIMMER inconsistent (test 3)". Keep that number so the badge matches
     # the Guidance promise that the message says which test failed.
@@ -246,11 +311,6 @@ validate_combined_row <- function(
   sd_given <- !is.null(sd_str) && nzchar(trimws(sd_str))
   min_given <- !is.null(min_str) && nzchar(trimws(min_str))
   max_given <- !is.null(max_str) && nzchar(trimws(max_str))
-  if (sd_given && isTRUE(type == "Percentage") && !(min_given && max_given)) {
-    return(
-      "For percentages with SD, Min and Max are required (typically 0 and 100)"
-    )
-  }
   if (sd_given) {
     sd_num <- parse_number(sd_str)
     if (is.na(sd_num)) {
@@ -309,14 +369,15 @@ validate_combined_row <- function(
 # - uninformative: TRUE if GRIM ran but could not have failed
 # - grim_digits: decimal places GRIM worked with (for the uninformative label)
 evaluate_row <- function(...) {
-  # A test that throws could not be run (e.g. after a breaking change in
-  # scrutiny). Report that as an error instead of quietly showing a verdict
-  # based on the remaining tests.
+  # A test that throws could not be run, e.g. because scrutiny refuses inputs
+  # beyond its exact range (N above about a million for GRIMMER) or after a
+  # breaking change in scrutiny. Report that as an error instead of quietly
+  # showing a verdict based on the remaining tests.
   tryCatch(
     evaluate_row_unsafe(...),
     error = function(e) {
       msg <- paste(
-        "Internal error:",
+        "Test could not run:",
         sub("\n.*", "", conditionMessage(e))
       )
       list(
@@ -337,8 +398,12 @@ evaluate_row_unsafe <- function(
   items,
   type,
   min_str,
-  max_str
+  max_str,
+  sd_meaning = "sd_sample"
 ) {
+  if (is.null(sd_meaning)) {
+    sd_meaning <- "sd_sample"
+  }
   if (is.null(x_str) || !nzchar(trimws(x_str))) {
     # Min and Max are left out: Percentage auto-fills them.
     started <- any(vapply(
@@ -406,7 +471,7 @@ evaluate_row_unsafe <- function(
     }
 
     if (sd_given && !is_percent) {
-      res <- safe_grimmer(x_str, sd_str, n_str, items)
+      res <- safe_grimmer(x_str, sd_str, n_str, items, sd_meaning)
       if (!is.na(res$ok)) {
         tests_run <- c(tests_run, "GRIMMER")
         if (!res$ok) {
@@ -414,10 +479,28 @@ evaluate_row_unsafe <- function(
         }
       }
     }
+
+    if (sd_given && is_percent) {
+      debit_ok <- safe_debit(x_str, sd_str, n_str, sd_meaning)
+      if (!is.na(debit_ok)) {
+        tests_run <- c(tests_run, "DEBIT")
+        # A percentage that fails GRIM fails DEBIT, too; name only GRIM then.
+        if (!debit_ok && !isFALSE(grim_ok)) {
+          reasons <- c(reasons, "SD fails DEBIT")
+        }
+      }
+    }
   }
 
   if (bounds_active) {
-    bounds_reasons <- safe_bounds(x_str, sd_str, n_str, min_str, max_str)
+    bounds_reasons <- safe_bounds(
+      x_str,
+      sd_str,
+      n_str,
+      min_str,
+      max_str,
+      sd_meaning
+    )
     tests_run <- c(tests_run, "Bounds")
     if (length(bounds_reasons) > 0) {
       reasons <- c(reasons, bounds_reasons)
@@ -524,7 +607,8 @@ evaluate_pair_t_test <- function(
   sd2s,
   n2s,
   p_str,
-  p_operator = "equals"
+  p_operator = "equals",
+  sd_meaning = "sd_sample"
 ) {
   if (is.null(p_operator) || !nzchar(p_operator)) {
     p_operator <- "equals"
@@ -554,6 +638,11 @@ evaluate_pair_t_test <- function(
   }
   if (!all(filled)) {
     return(list(status = "incomplete"))
+  }
+  # recalc takes sample SDs. Converting another kind of SD would also scale
+  # its rounding interval, which recalc derives from the decimal places alone.
+  if (!is.null(sd_meaning) && sd_meaning != "sd_sample") {
+    return(list(status = "skipped", msg = T_TEST_SKIPPED_MSG))
   }
 
   m1 <- parse_number(m1s)
@@ -677,6 +766,7 @@ evaluate_pair_t_test <- function(
 }
 
 MIXED_DIGITS_NOTE <- "Groups differ in decimal places; coarser precision used"
+T_TEST_SKIPPED_MSG <- "t-test needs sample SDs (see \"SD reported as\")"
 
 # Merges ranges (data frame with p_min, p_max) that overlap or touch once
 # rounded to `digits`, so that only gaps visible in the display remain.
@@ -843,11 +933,15 @@ t_test_result_ui <- function(tt) {
   if (is.null(tt) || identical(tt$status, "blank")) {
     return(span())
   }
-  if (identical(tt$status, "incomplete")) {
+  if (tt$status %in% c("incomplete", "skipped")) {
     return(span(
       class = "text-muted",
       style = "font-size:.75rem;",
-      "Awaiting both groups' M, SD, N"
+      if (identical(tt$status, "skipped")) {
+        tt$msg
+      } else {
+        "Awaiting both groups' M, SD, N"
+      }
     ))
   }
   if (identical(tt$status, "error")) {
@@ -997,8 +1091,30 @@ type_assumption <- tagList(
   tags$em("Sample size"),
   " you enter (e.g., 10 of 22 people = 45.5%) – not a weighted percentage and not an average of percentages. If unsure, choose ",
   tags$em("Any mean"),
-  ": then GRIM and GRIMMER are skipped and only the bounds are checked."
+  ": then GRIM, GRIMMER and DEBIT are skipped and only the bounds are checked."
 )
+
+sd_meaning_assumption <- tagList(
+  "4. Set ",
+  tags$em("SD reported as"),
+  " for all rows in this tab. Most papers report sample SDs. Some report a population SD (e.g., from Excel's STDEV.P) or a standard error labelled as an SD. If unsure, choose ",
+  tags$em("Sample or population SD"),
+  ", which accepts either."
+)
+
+sd_meaning_input <- function(id) {
+  div(
+    style = "max-width:360px;",
+    selectInput(
+      id,
+      "SD reported as",
+      choices = SD_MEANING_CHOICES,
+      selected = "sd_sample",
+      width = "100%",
+      selectize = FALSE
+    )
+  )
+}
 
 items_input <- function(id) {
   numericInput(id, NULL, value = 1, min = 1, step = 1, width = "100%")
@@ -1527,8 +1643,12 @@ ui <- page_navbar(
             " should be set to the scale's logical min and max, not the observed min and max in the data.",
             br(),
             br(),
-            type_assumption
+            type_assumption,
+            br(),
+            br(),
+            sd_meaning_assumption
           ),
+          sd_meaning_input("gb_sd_meaning"),
           div(
             class = "single-grid-wrap",
             div(
@@ -1594,8 +1714,12 @@ ui <- page_navbar(
             " should be set to the scale's logical min and max, not the observed min and max in the data.",
             br(),
             br(),
-            type_assumption
+            type_assumption,
+            br(),
+            br(),
+            sd_meaning_assumption
           ),
+          sd_meaning_input("cb_sd_meaning"),
           div(
             class = "combined-grid-wrap",
             div(
@@ -1716,6 +1840,10 @@ ui <- page_navbar(
                 "GRIMMER adds 3 separate tests; the message will say which one failed."
               ),
               tags$li(
+                "\"SD fails DEBIT\": for a percentage from a yes/no count, the",
+                "SD is not one that yes/no data with this percentage and N can have."
+              ),
+              tags$li(
                 "\"Mean out of bounds\": the reported mean is below ",
                 tags$em("Min"),
                 " or above ",
@@ -1738,9 +1866,14 @@ ui <- page_navbar(
             "GRIMMER is GRIM plus 3 additional tests:",
             tags$ol(
               tags$li(
-                "The reconstructed sum of squared observations must be a whole number."
+                "The reconstructed sum of squared observations must be a whole number,",
+                "and one that whole numbers with the reconstructed sum can reach",
+                "(e.g., no 11 whole numbers summing to 40 have an SD below 0.5)."
               ),
-              tags$li("The reconstructed SD must match the reported one."),
+              tags$li(
+                "The reconstructed SD must match the reported one. Test 1",
+                "implies this, so it is never named as the reason."
+              ),
               tags$li(
                 "The reconstructed sum of squared observations and the",
                 "reconstructed sum of integers of which the reported means",
@@ -1752,9 +1885,32 @@ ui <- page_navbar(
             " must lie inside [Logical Min, Logical Max]; (b) the SD must",
             " not exceed the Bhatia–Davis upper bound. If only one of the two",
             " is entered, the mean is checked against that bound alone and a",
-            " note says so; check (b) needs both. When \"Type\" is set to \"% from yes/no count\"",
-            "and an SD is provided, \"Logical Min\" and \"Logical Max\" are required",
-            " (typically 0 and 100), and GRIMMER is not run.",
+            " note says so; check (b) needs both.",
+            br(),
+            br(),
+            tags$strong("Percentages with an SD:"),
+            "When \"Type\" is set to \"% from yes/no count\" and an SD is",
+            "provided, the DEBIT test checks the SD instead of GRIMMER. Data",
+            "of yes/no answers have exactly one possible SD for each",
+            "percentage and N, so DEBIT is precise. The SD may be entered on",
+            "the scale of proportions (e.g., 0.51) or of percentages (e.g.,",
+            "51.0); the app tries both, since at most one of them can fit.",
+            br(),
+            br(),
+            tags$strong("SD reported as:"),
+            "GRIMMER, DEBIT and the Bhatia–Davis bound assume sample SDs by",
+            "default, which divide by N – 1 (as in SPSS, R, Stata, or",
+            "Excel's STDEV.S). If a study reports population SDs, which divide",
+            "by N (as in Excel's STDEV.P or NumPy), tested as sample SDs they",
+            "may look inconsistent, especially at small N. Choose",
+            tags$em("Sample or population SD"),
+            "if unsure: it accepts an SD that fits either. Some papers report",
+            "a standard error as if it were an SD; choose",
+            tags$em("Standard error, reported as SD"),
+            "to test that premise. This test is weak: from about N = 20 on,",
+            "nearly every mean that passes GRIM is consistent under it. The",
+            "t-test recalculation needs sample SDs, so it is skipped for any",
+            "other choice.",
             br(),
             br(),
             tags$strong("Type:"),
@@ -1895,7 +2051,31 @@ ui <- page_navbar(
       card(
         card_header("Changelog"),
         card_body(
-          h5("0.2.0 (2026-10-02)"),
+          h5("0.3.0 (2026-11-05)"),
+          tags$ul(
+            class = "text-muted",
+            tags$li(
+              "Updated to scrutiny 1.0.0. GRIMMER no longer flags some",
+              "consistent value sets that the old version did (false",
+              "positives), and it now catches SDs that no sample of whole",
+              "numbers can have, such as an SD below the smallest possible",
+              "one for the given mean and N."
+            ),
+            tags$li(
+              "Inputs too large for an exact test, such as N above about a",
+              "million for GRIMMER, are reported as \"Test could not run\"."
+            ),
+            tags$li(
+              "Percentages with an SD are tested with DEBIT. The SD may be on",
+              "the scale of proportions or of percentages, and Logical Min and",
+              "Max are no longer required for it."
+            ),
+            tags$li(
+              "New \"SD reported as\" setting on both input tabs, for",
+              "population SDs and standard errors reported as SDs."
+            )
+          ),
+          h5(class = "mt-4", "0.2.0 (2026-10-02)"),
           p(class = "text-muted mb-2", "First numbered version."),
           tags$ul(
             class = "text-muted",
@@ -1983,6 +2163,13 @@ ui <- page_navbar(
             a(
               "Allard (2018)",
               href = "https://aurelienallard.netlify.app/post/anaytic-grimmer-possibility-standard-deviations/",
+              style = "color:#ca225e;",
+              .noWS = "after"
+            ),
+            ". For DEBIT, see ",
+            a(
+              "Heathers and Brown (2019)",
+              href = "https://osf.io/5vb3u/",
               style = "color:#ca225e;",
               .noWS = "after"
             ),
@@ -2129,7 +2316,8 @@ server <- function(input, output, session) {
           items,
           type,
           min_str,
-          max_str
+          max_str,
+          input$gb_sd_meaning
         )
         if (!is.null(res$err)) {
           return(error_ui(res$err))
@@ -2157,7 +2345,8 @@ server <- function(input, output, session) {
           input[[paste0("gb_items_", i)]],
           input[[paste0("gb_type_", i)]],
           input[[paste0("gb_min_", i)]],
-          input[[paste0("gb_max_", i)]]
+          input[[paste0("gb_max_", i)]],
+          input$gb_sd_meaning
         )$ok
       },
       logical(1)
@@ -2197,7 +2386,8 @@ server <- function(input, output, session) {
         max_given <- !is.null(max_str) && nzchar(trimws(max_str))
         # fmt: skip
         res <- evaluate_row(
-          x_str, sd_str, n_str, items, type, min_str, max_str
+          x_str, sd_str, n_str, items, type, min_str, max_str,
+          input$gb_sd_meaning
         )
         test_label <- if (length(res$tests_run) == 0) {
           ""
@@ -2227,6 +2417,7 @@ server <- function(input, output, session) {
           type = if (is.null(type)) "Any mean" else type,
           mean = trimws(x_str),
           sd = if (sd_given) trimws(sd_str) else "",
+          sd_meaning = input$gb_sd_meaning %||% "sd_sample",
           n = if (!is.null(n_str)) trimws(n_str) else "",
           items = if (!is.null(items) && !is.na(items)) items else NA_real_,
           min = if (min_given) trimws(min_str) else "",
@@ -2245,6 +2436,7 @@ server <- function(input, output, session) {
           type = character(),
           mean = character(),
           sd = character(),
+          sd_meaning = character(),
           n = character(),
           items = numeric(),
           min = character(),
@@ -2310,13 +2502,23 @@ server <- function(input, output, session) {
       items = input[[paste0("cb_items_", rid)]],
       type = input[[paste0("cb_type_", rid)]],
       min = input[[paste0("cb_min_", rid)]],
-      max = input[[paste0("cb_max_", rid)]]
+      max = input[[paste0("cb_max_", rid)]],
+      sd_meaning = input$cb_sd_meaning
     )
   }
 
   row_result_from_inputs <- function(rid) {
     r <- read_row(rid)
-    evaluate_row(r$x, r$sd, r$n, r$items, r$type, r$min, r$max)
+    evaluate_row(
+      r$x,
+      r$sd,
+      r$n,
+      r$items,
+      r$type,
+      r$min,
+      r$max,
+      r$sd_meaning
+    )
   }
 
   pair_t_test_from_inputs <- function(p) {
@@ -2330,7 +2532,8 @@ server <- function(input, output, session) {
       input[[paste0("cb_sd_", rid_b)]],
       input[[paste0("cb_n_", rid_b)]],
       input[[paste0("cb_p_", p)]],
-      input[[paste0("cb_pop_", p)]]
+      input[[paste0("cb_pop_", p)]],
+      input$cb_sd_meaning
     )
   }
 
@@ -2362,7 +2565,8 @@ server <- function(input, output, session) {
               r$items,
               r$type,
               r$min,
-              r$max
+              r$max,
+              r$sd_meaning
             )
             if (!is.null(res$err)) {
               return(error_ui(res$err))
@@ -2494,7 +2698,7 @@ server <- function(input, output, session) {
           max_given <- !is.null(r$max) && nzchar(trimws(r$max))
           # fmt: skip
           res <- evaluate_row(
-            r$x, r$sd, r$n, r$items, r$type, r$min, r$max
+            r$x, r$sd, r$n, r$items, r$type, r$min, r$max, r$sd_meaning
           )
           test_label <- if (length(res$tests_run) == 0) {
             ""
@@ -2528,6 +2732,7 @@ server <- function(input, output, session) {
             type = if (is.null(r$type)) "Any mean" else r$type,
             mean = trimws(r$x),
             sd = if (sd_given) trimws(r$sd) else "",
+            sd_meaning = r$sd_meaning %||% "sd_sample",
             n = if (!is.null(r$n)) trimws(r$n) else "",
             items = if (!is.null(r$items) && !is.na(r$items)) {
               r$items
@@ -2560,7 +2765,7 @@ server <- function(input, output, session) {
             } else {
               NA
             },
-            p_note = if (is_first && identical(tt$status, "error")) {
+            p_note = if (is_first && tt$status %in% c("error", "skipped")) {
               tt$msg
             } else if (is_first && tt_ok) {
               # recalc_p_min and recalc_p_max span all ranges; name them when
@@ -2598,6 +2803,7 @@ server <- function(input, output, session) {
           type = character(),
           mean = character(),
           sd = character(),
+          sd_meaning = character(),
           n = character(),
           items = numeric(),
           min = character(),

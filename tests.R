@@ -12,12 +12,13 @@ evaluate <- function(
   type = "Whole-number mean",
   min = "",
   max = "",
-  integer = TRUE
+  integer = TRUE,
+  sd_meaning = "sd_sample"
 ) {
   if (!integer) {
     type <- "Any mean"
   }
-  evaluate_row(x, sd, n, items, type, min, max)
+  evaluate_row(x, sd, n, items, type, min, max, sd_meaning)
 }
 
 # Prints each part as it runs and how long it took to pass.
@@ -46,6 +47,53 @@ r <- evaluate("5.21", "", "30")
 stopifnot(isFALSE(r$ok), identical(r$reasons, "Mean fails GRIM"))
 stopifnot(isTRUE(evaluate("45.5", "", "22", type = "Percentage")$ok))
 stopifnot(isFALSE(evaluate("45.4", "", "22", type = "Percentage")$ok))
+# scrutiny 1.0.0: an SD below the smallest one that whole numbers with this
+# mean can have (fourteen 4s and ten 3s give 0.504), and one only reachable by
+# non-integers (1 ± sqrt(2)).
+r <- evaluate("3.58", "0", "24")
+stopifnot(isFALSE(r$ok), identical(r$reasons, "SD fails GRIMMER (test 1)"))
+r <- evaluate("1.0", "2.0", "2")
+stopifnot(isFALSE(r$ok), identical(r$reasons, "SD fails GRIMMER (test 1)"))
+# DEBIT: 10 of 22 people have sample SD 0.5096 and population SD 0.4979, which
+# may be entered as proportions or as percentages.
+r <- evaluate("45.5", "0.498", "22", type = "Percentage")
+stopifnot(
+  identical(r$tests_run, c("GRIM", "DEBIT")),
+  identical(r$reasons, "SD fails DEBIT"),
+  isTRUE(evaluate("45.5", "0.510", "22", type = "Percentage")$ok),
+  isTRUE(evaluate("45.5", "51.0", "22", type = "Percentage")$ok),
+  isTRUE(
+    evaluate("45.5", "0.498", "22", type = "Percentage", sd_meaning = "sd_pop")$ok
+  ),
+  identical(
+    evaluate("45.4", "0.510", "22", type = "Percentage")$reasons,
+    "Percentage fails GRIM"
+  )
+)
+# Data 1, 2, 3, 4, 5 have sample SD 1.58 and population SD 1.41.
+stopifnot(
+  isTRUE(evaluate("3.0", "1.58", "5")$ok),
+  isTRUE(evaluate("3.0", "1.41", "5", sd_meaning = "sd_pop")$ok),
+  isTRUE(evaluate("3.0", "1.58", "5", sd_meaning = "sd_sample_or_pop")$ok),
+  identical(
+    evaluate("2.0", "0.58", "3", sd_meaning = "sd_sample_or_pop")$reasons,
+    "SD fails GRIMMER (sample SD: test 1; population SD: test 3)"
+  )
+)
+# The t-test only takes sample SDs.
+stopifnot(
+  identical(
+    evaluate_pair_t_test("4.0", "1.0", "20", "4.5", "1.1", "20", "", "equals", "se")$status,
+    "skipped"
+  ),
+  identical(
+    evaluate_pair_t_test("", "", "", "", "", "", "", "equals", "sd_pop")$status,
+    "blank"
+  )
+)
+# Inputs beyond scrutiny's exact range are reported, not swallowed.
+r <- evaluate("3.5", "1.2", "20000000")
+stopifnot(is.na(r$ok), grepl("^Test could not run: ", r$err))
 
 # Uninformative GRIM: N * items >= 10^digits
 stopifnot(
@@ -70,7 +118,7 @@ stopifnot(
 real_grim <- grim
 grim <- function(...) stop("boom")
 r <- evaluate("5.20", "", "30")
-stopifnot(is.na(r$ok), grepl("Internal error: boom", r$err))
+stopifnot(is.na(r$ok), grepl("Test could not run: boom", r$err))
 grim <- real_grim
 rm(real_grim)
 
@@ -230,15 +278,41 @@ expect_caught(
 )
 rm(fixed_safe_grim)
 
-section("GRIMMER against brute force (3,000 cases) and 5 mutants")
+section("GRIMMER against brute force (3,000 cases) and 6 mutants")
 
 # GRIMMER's conditions from first principles. Each of the n participants has a
 # whole-number total T_i of their `items` answers. Some sum S of these must
 # give the mean (as for GRIM), and some sum Q of their squares must give the
-# SD, sqrt((Q - S^2 / n) / ((n - 1) * items^2)), and have the parity of S,
-# since T_i^2 and T_i are both even or both odd. Ties may round either way.
-# Integer arithmetic, so no floating-point error.
-grimmer_hit <- function(x, sd, n, items) {
+# SD, sqrt((Q - S^2 / n) / ((n - 1) * items^2)), and be reachable by n whole
+# numbers that sum to S. Ties may round either way. Integer arithmetic, so no
+# floating-point error.
+
+# Whether n whole numbers that sum to s can have the sum of squares Q. From
+# n = 5 on, it suffices that Q has the parity of s (T_i^2 and T_i are both even
+# or both odd) and is at least that of the most even split: r values of q + 1
+# and n - r of q. Smaller n are enumerated.
+reachable <- function(Q, s, n) {
+  if (n == 1) {
+    return(Q == s^2)
+  }
+  V <- Q - s^2 / n
+  if (V < 0) {
+    return(FALSE)
+  }
+  if (n >= 5) {
+    q <- s %/% n
+    r <- s %% n
+    return(Q >= n * q^2 + 2 * q * r + r && (Q - s) %% 2 == 0)
+  }
+  for (t in ceiling(s / n - sqrt(V)):floor(s / n + sqrt(V))) {
+    if (reachable(Q - t^2, s - t, n - 1)) {
+      return(TRUE)
+    }
+  }
+  FALSE
+}
+
+grimmer_hit <- function(x, sd, n, items, pop = FALSE) {
   N <- n * items
   Mx <- 10^decimals(x)
   Ms <- 10^decimals(sd)
@@ -248,12 +322,15 @@ grimmer_hit <- function(x, sd, n, items) {
   S <- S[2 * abs(S * Mx - r * N) <= N]
   # The SD lies within half a unit of u / Ms if 4 * Ms^2 * (n * Q - S^2) lies
   # between these two:
-  lo <- n * (n - 1) * items^2 * max(2 * u - 1, 0)^2
-  hi <- n * (n - 1) * items^2 * (2 * u + 1)^2
+  # A sample SD divides by n - 1, a population SD by n.
+  d <- if (pop) n else n - 1
+  lo <- n * d * items^2 * max(2 * u - 1, 0)^2
+  hi <- n * d * items^2 * (2 * u + 1)^2
   for (s in S) {
     Q <- floor((s^2 + lo / (4 * Ms^2)) / n):ceiling((s^2 + hi / (4 * Ms^2)) / n)
     v <- 4 * Ms^2 * (n * Q - s^2)
-    if (any(v >= lo & v <= hi & (Q - s) %% 2 == 0)) {
+    Q <- Q[v >= lo & v <= hi]
+    if (any(vapply(Q, reachable, logical(1), s = s, n = n))) {
       return(TRUE)
     }
   }
@@ -269,21 +346,29 @@ grimmer_cases <- lapply(1:3000, function(i) {
   d <- rowMeans(matrix(sample(1:7, n * items, TRUE), n))
   dx <- sample(0:3, 1)
   ds <- sample(0:3, 1)
+  pop <- runif(1) < .3
   list(
     x = fmt(mean(d) + (runif(1) < .3) * sample(c(-1, 1), 1) * 10^-dx, dx),
-    sd = fmt(max(sd(d) + sample(-4:4, 1) * 10^-ds, 0), ds),
+    sd = fmt(max(sd(d) * (if (pop) sqrt((n - 1) / n) else 1) + sample(-4:4, 1) * 10^-ds, 0), ds),
     n = n,
-    items = items
+    items = items,
+    pop = pop
   )
 })
 
 # Returns the first case where the app disagrees with brute force, or NULL.
 grimmer_mismatch <- function(cases) {
   for (k in cases) {
-    r <- evaluate(k$x, k$sd, as.character(k$n), k$items)
+    r <- evaluate(
+      k$x,
+      k$sd,
+      as.character(k$n),
+      k$items,
+      sd_meaning = if (k$pop) "sd_pop" else "sd_sample"
+    )
     expected <- if (!grim_hit(units(k$x), k$n * k$items, 10^decimals(k$x))) {
       "Mean fails GRIM"
-    } else if (!grimmer_hit(k$x, k$sd, k$n, k$items)) {
+    } else if (!grimmer_hit(k$x, k$sd, k$n, k$items, k$pop)) {
       "SD fails GRIMMER"
     } else {
       character(0)
@@ -323,8 +408,11 @@ expect_caught(
     # test 2 never fails (none in 20,000 random cases).
     test_1_skipped = skip_grimmer_test(1),
     test_3_skipped = skip_grimmer_test(3),
-    items_ignored = function(x_str, sd_str, n_str, items) {
-      real_safe_grimmer(x_str, sd_str, n_str, 1)
+    items_ignored = function(x_str, sd_str, n_str, items, ...) {
+      real_safe_grimmer(x_str, sd_str, n_str, 1, ...)
+    },
+    sd_meaning_ignored = function(x_str, sd_str, n_str, items, ...) {
+      real_safe_grimmer(x_str, sd_str, n_str, items)
     },
     sd_one_decimal_coarser = mutate(
       safe_grimmer,
@@ -335,6 +423,110 @@ expect_caught(
   function() grimmer_mismatch(grimmer_cases)
 )
 rm(real_safe_grimmer)
+
+section("DEBIT against brute force (3,000 cases) and 3 mutants")
+
+# A percentage from a yes/no count is 100 * k / n for k of n people. Its SD
+# is fixed by k: sqrt(k * (n - k) / (n * d)), where d is n - 1 for a sample
+# SD and n for a population SD. The reported SD may be on the scale of
+# proportions or of percentages. Ties may round either way. Integer
+# arithmetic, as for GRIMMER.
+debit_hit <- function(x, sd, n, pop) {
+  M <- 10^decimals(x)
+  k <- 0:n
+  k <- k[abs(200 * k * M - 2 * units(x) * n) <= n]
+  d <- if (pop) n else n - 1
+  u <- units(sd)
+  # Ms: the SD's last decimal place, as a fraction of a proportion
+  any(vapply(
+    c(1, 100) * 10^decimals(sd),
+    function(Ms) {
+      v <- 4 * Ms^2 * k * (n - k)
+      any(v >= n * d * max(2 * u - 1, 0)^2 & v <= n * d * (2 * u + 1)^2)
+    },
+    logical(1)
+  ))
+}
+
+# Genuine yes/no counts, the percentage nudged by a unit some of the time and
+# the SD by up to 2, on either scale.
+set.seed(21)
+debit_cases <- lapply(1:3000, function(i) {
+  n <- sample(c(2:30, sample(31:200, 1)), 1)
+  k <- sample(0:n, 1)
+  pop <- runif(1) < .3
+  percent_scale <- runif(1) < .5
+  dx <- sample(0:2, 1)
+  ds <- sample(if (percent_scale) 0:2 else 1:3, 1)
+  sd <- sqrt(k * (n - k) / (n * (if (pop) n else n - 1)))
+  list(
+    x = fmt(100 * k / n + (runif(1) < .3) * sample(c(-1, 1), 1) * 10^-dx, dx),
+    sd = fmt(
+      max(sd * (if (percent_scale) 100 else 1) + sample(-2:2, 1) * 10^-ds, 0),
+      ds
+    ),
+    n = n,
+    pop = pop
+  )
+})
+debit_cases <- Filter(
+  function(k) as.numeric(k$x) >= 0 && as.numeric(k$x) <= 100,
+  debit_cases
+)
+
+# Returns the first case where the app disagrees with brute force, or NULL.
+debit_mismatch <- function(cases) {
+  for (k in cases) {
+    r <- evaluate(
+      k$x,
+      k$sd,
+      as.character(k$n),
+      type = "Percentage",
+      sd_meaning = if (k$pop) "sd_pop" else "sd_sample"
+    )
+    expected <- if (!grim_hit(units(k$x), k$n, 100 * 10^decimals(k$x))) {
+      "Percentage fails GRIM"
+    } else if (!debit_hit(k$x, k$sd, k$n, k$pop)) {
+      "SD fails DEBIT"
+    } else {
+      character(0)
+    }
+    if (
+      !identical(r$tests_run, c("GRIM", "DEBIT")) ||
+        !identical(r$reasons, expected)
+    ) {
+      return(c(k, list(app = r$reasons, expected = expected)))
+    }
+  }
+  NULL
+}
+
+bad <- debit_mismatch(debit_cases)
+if (!is.null(bad)) {
+  stop("DEBIT disagrees with brute force: ", deparse(bad))
+}
+
+real_safe_debit <- safe_debit
+expect_caught(
+  "safe_debit",
+  list(
+    proportions_only = mutate(
+      safe_debit,
+      "test(sd, ds) | test(hundredth(sd_str), ds + 2L)",
+      "test(sd, ds)"
+    ),
+    percentages_only = mutate(
+      safe_debit,
+      "test(sd, ds) | test(hundredth(sd_str), ds + 2L)",
+      "test(hundredth(sd_str), ds + 2L)"
+    ),
+    sd_meaning_ignored = function(x_str, sd_str, n_str, ...) {
+      real_safe_debit(x_str, sd_str, n_str)
+    }
+  ),
+  function() debit_mismatch(debit_cases)
+)
+rm(real_safe_debit)
 
 section("No false positives on every small data set (n = 2-7)")
 
@@ -711,9 +903,9 @@ stopifnot(
     validation_error("5.2", "", "20", items = 0),
     "Items must be a positive whole number"
   ),
-  identical(
-    validation_error("45.5", "2.1", "22", type = "Percentage", max = "100"),
-    "For percentages with SD, Min and Max are required (typically 0 and 100)"
+  # DEBIT tests the SD of a percentage without bounds.
+  is.null(
+    validation_error("45.5", "2.1", "22", type = "Percentage", max = "100")
   ),
   identical(
     validation_error("5.2", "", "20", min = "abc"),
@@ -1102,6 +1294,7 @@ shiny::testServer(app, {
     nrow(csv) == 1,
     csv$app_version == APP_VERSION,
     csv$label == "1",
+    csv$sd_meaning == "sd_sample",
     csv$test == "GRIM",
     csv$consistent == "TRUE",
     grepl("Uninformative GRIM", csv$notes),
