@@ -76,7 +76,7 @@ count_decimal_places <- decimal_places
 safe_grim <- function(x_str, n_str, items, percent = FALSE) {
   x <- parse_number(x_str)
   n <- suppressWarnings(as.integer(parse_number(n_str)))
-  # grim() adds 2 to digits_x internally when percent = TRUE, so we must not add
+  # grim() adds 2 to digits_x internally for a percentage, so we must not add
   # it here as well: doing so would give percentages dp + 4 effective decimal
   # places, making the test wrongly strict and disagreeing with
   # grim_uninformative() (which relies on grim_exp_incon()'s internal +2).
@@ -88,7 +88,14 @@ safe_grim <- function(x_str, n_str, items, percent = FALSE) {
   # No tryCatch here or in the other test wrappers: an error means the test
   # could not be run, which evaluate_row() reports instead of silently
   # treating the row as untested.
-  grim(x = x, n = n, digits_x = dx, items_averaged = it, percent = percent)
+  grim(
+    x = x,
+    n = n,
+    digits_x = dx,
+    items_averaged = it,
+    data_type = "integer",
+    x_meaning = if (percent) "percentage" else "mean"
+  )
 }
 
 grim_uninformative <- function(x_str, n_str, items, percent = FALSE) {
@@ -103,7 +110,8 @@ grim_uninformative <- function(x_str, n_str, items, percent = FALSE) {
     n = n,
     digits_x = count_decimal_places(x_str),
     items_averaged = it,
-    percent = percent
+    data_type = "integer",
+    x_meaning = if (percent) "percentage" else "mean"
   )
   isTRUE(p == 0)
 }
@@ -131,6 +139,7 @@ safe_grimmer <- function(
     digits_x = dx,
     digits_sd = ds,
     items_averaged = it,
+    data_type = "integer",
     sd_meaning = sd_meaning
   )
   list(ok = as.logical(r$consistency), reason = r$reason)
@@ -161,6 +170,7 @@ safe_debit <- function(x_str, sd_str, n_str, sd_meaning = "sd_sample") {
       n = n,
       digits_x = count_decimal_places(x_str) + 2L,
       digits_sd = digits_sd,
+      data_type = "integer",
       sd_meaning = sd_meaning
     )
   }

@@ -264,7 +264,8 @@ expect_caught(
           as.integer(n_str),
           dx,
           as.integer(items),
-          percent
+          "integer",
+          if (percent) "percentage" else "mean"
         )
     },
     percent_ignored = function(x_str, n_str, items, percent = FALSE) {
