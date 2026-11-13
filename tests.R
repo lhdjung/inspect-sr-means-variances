@@ -1093,6 +1093,36 @@ r <- run_t_test(
   op = "less_than"
 )
 stopifnot(isFALSE(r$inbounds), r$min_p > 0.054, r$min_p < 0.055)
+# Shown with enough decimals to tell the lowest p from the threshold: .0544
+# and .0498 were both shown as [0.05, 0.07].
+stopifnot(
+  p_ranges_text(r$ranges, r$p_digits) == "p ∈ [0.054, 0.072]",
+  identical(
+    with(
+      run_t_test(
+        "5.10",
+        "2.1",
+        "30",
+        "4.10",
+        "1.9",
+        "30",
+        p = "0.05",
+        op = "less_than"
+      ),
+      c(inbounds, p_ranges_text(ranges, p_digits) == "p ∈ [0.0498, 0.0668]")
+    ),
+    c(TRUE, TRUE)
+  )
+)
+# A p without decimals is rounded to a whole number: .80 to .88 rounds to 1.
+stopifnot(
+  isTRUE(
+    run_t_test("5.00", "1.00", "50", "5.04", "1.00", "50", p = "1")$inbounds
+  ),
+  isFALSE(
+    run_t_test("5.00", "1.00", "50", "5.04", "1.00", "50", p = "1.0")$inbounds
+  )
+)
 r <- run_t_test(
   "5.18",
   "2.1",

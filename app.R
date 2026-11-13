@@ -732,7 +732,11 @@ evaluate_pair_t_test <- function(
   sd_digits <- min(count_decimal_places(sd1s), count_decimal_places(sd2s))
   mixed_digits <- count_decimal_places(m1s) != count_decimal_places(m2s) ||
     count_decimal_places(sd1s) != count_decimal_places(sd2s)
-  p_digits <- if (p_given) max(1L, count_decimal_places(p_str)) else 3L
+  # `p_dp` is the reported p's own precision, which sets its rounding interval:
+  # "1" covers [0.5, 1]. `p_digits` is at least 1 and is what recalc and the
+  # display get.
+  p_dp <- if (p_given) count_decimal_places(p_str) else 3L
+  p_digits <- max(1L, p_dp)
 
   # A finer value exactly halfway between two coarser ones (4.15 at 1 decimal)
   # has a rounding interval straddling both, so every such combination is
@@ -810,9 +814,19 @@ evaluate_pair_t_test <- function(
   if (is.null(intervals) || nrow(intervals) == 0 || anyNA(intervals)) {
     return(list(status = "error", msg = "Could not recalculate"))
   }
-  ranges <- merge_ranges(intervals, p_digits)
   min_p <- min(intervals$p_min)
   max_p <- max(intervals$p_max)
+  # An inequality is decided by the unrounded end of the range, so show it
+  # with enough decimals to tell it from the threshold: "p < .05" with a
+  # lowest p of .0498 must not be shown as [0.05, ...].
+  if (p_given && p_operator != "equals") {
+    end <- if (startsWith(p_operator, "less")) min_p else max_p
+    p_digits <- p_digits + 1L
+    while (p_digits < 6L && round(end, p_digits) == p_num && end != p_num) {
+      p_digits <- p_digits + 1L
+    }
+  }
+  ranges <- merge_ranges(intervals, p_digits)
 
   # The verdict is worked out here, not taken from recalc (0.6), which rounds
   # the ends of the range before comparing them with an inequality's threshold
@@ -821,7 +835,7 @@ evaluate_pair_t_test <- function(
   # interval reaches one of the ranges. A threshold is exact.
   inbounds <- NA
   if (p_given) {
-    half_p <- 0.5 * 10^-p_digits
+    half_p <- 0.5 * 10^-p_dp
     eps <- 1e-9
     inbounds <- switch(
       p_operator,
@@ -2176,7 +2190,7 @@ ui <- page_navbar(
             " and the bounds, which apply to GRIM / GRIMMER / Bounds only. ",
             tags$em("Type"),
             " matters in one case: for two percentages whose SDs are entered",
-            " as proportions (1 or less), the means are read as proportions",
+            " as proportions (above 0 and at most 1), the means are read as proportions",
             " too, so that both are on the same scale.",
             " Decimal precision for the means and SDs is detected automatically",
             " from the values you enter, so enter them exactly as reported,",
@@ -2239,7 +2253,13 @@ ui <- page_navbar(
             tags$li(
               "t-test: an inequality such as \"p < .05\" was accepted when",
               "the lowest possible p only rounded to .05 (e.g., 0.054). The",
-              "threshold is now taken as exact."
+              "threshold is now taken as exact. Its range is shown with",
+              "enough decimals to tell it from the threshold."
+            ),
+            tags$li(
+              "t-test: a p reported without decimals, such as \"p = 1\",",
+              "was checked as if it had one decimal, so a p of 0.88 was shown",
+              "as \"Inconsistent\" with it."
             ),
             tags$li(
               "A mean times N above about 2 billion no longer stops GRIMMER",
