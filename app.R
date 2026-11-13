@@ -1119,9 +1119,10 @@ t_test_result_ui <- function(tt) {
   )
 }
 
-summary_bar <- function(results_vec) {
+# `n_err` is the number of rows showing an error instead of a verdict.
+summary_bar <- function(results_vec, n_err = 0L) {
   tested <- !is.na(results_vec)
-  if (sum(tested) == 0) {
+  if (sum(tested) == 0 && n_err == 0) {
     return(NULL)
   }
   n_pass <- sum(results_vec[tested])
@@ -1139,8 +1140,27 @@ summary_bar <- function(results_vec) {
       paste(n_tot, if (n_tot == 1) "case" else "cases", "tested")
     ),
     span(class = "text-success fw-semibold", paste(n_pass, "consistent")),
-    span(class = "text-danger fw-semibold", paste(n_fail, "inconsistent"))
+    span(class = "text-danger fw-semibold", paste(n_fail, "inconsistent")),
+    not_checked_span(n_err)
   )
+}
+
+# Summary bar for a list of evaluate_row() results.
+summarise_rows <- function(results) {
+  summary_bar(
+    vapply(results, function(r) r$ok, logical(1)),
+    sum(vapply(results, function(r) !is.null(r$err), logical(1)))
+  )
+}
+
+not_checked_span <- function(n_err) {
+  if (n_err > 0) {
+    span(
+      style = "color:#e67e22;",
+      class = "fw-semibold",
+      paste(n_err, "not checked (see warning)")
+    )
+  }
 }
 
 # Summary line for the t-test recalculations across pairs.
@@ -1151,7 +1171,12 @@ t_test_summary_bar <- function(tts) {
     },
     tts
   )
-  if (length(decided) == 0) {
+  n_err <- sum(vapply(
+    tts,
+    function(tt) identical(tt$status, "error"),
+    logical(1)
+  ))
+  if (length(decided) == 0 && n_err == 0) {
     return(NULL)
   }
   inbounds <- vapply(decided, function(tt) isTRUE(tt$inbounds), logical(1))
@@ -1174,7 +1199,8 @@ t_test_summary_bar <- function(tts) {
       )
     ),
     span(class = "text-success fw-semibold", paste(n_ok, "consistent")),
-    span(class = "text-danger fw-semibold", paste(n_bad, "inconsistent"))
+    span(class = "text-danger fw-semibold", paste(n_bad, "inconsistent")),
+    not_checked_span(n_err)
   )
 }
 
@@ -2463,7 +2489,7 @@ server <- function(input, output, session) {
 
   output$gb_summary <- renderUI({
     s <- gb_slots()
-    results <- vapply(
+    results <- lapply(
       s,
       function(i) {
         evaluate_row(
@@ -2475,11 +2501,10 @@ server <- function(input, output, session) {
           input[[paste0("gb_min_", i)]],
           input[[paste0("gb_max_", i)]],
           input$gb_sd_meaning
-        )$ok
-      },
-      logical(1)
+        )
+      }
     )
-    summary_bar(results)
+    summarise_rows(results)
   })
 
   output$gb_download <- downloadHandler(
@@ -2757,12 +2782,7 @@ server <- function(input, output, session) {
   output$combined_summary <- renderUI({
     s <- pairs()
     rids <- unlist(lapply(s, function(p) paste0(p, c("a", "b"))))
-    results <- vapply(
-      rids,
-      function(rid) row_result_from_inputs(rid)$ok,
-      logical(1)
-    )
-    summary_bar(results)
+    summarise_rows(lapply(rids, row_result_from_inputs))
   })
 
   output$t_test_summary <- renderUI({

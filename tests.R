@@ -56,6 +56,11 @@ r <- evaluate("1.0", "2.0", "2")
 stopifnot(isFALSE(r$ok), identical(r$reasons, "SD fails GRIMMER (test 1)"))
 # A mean times N beyond integer range: 50,000 values of 100000.
 stopifnot(isTRUE(evaluate("100000.00", "0.00", "50000")$ok))
+# The summary counts rows that could not be checked.
+stopifnot(
+  is.null(summary_bar(NA)),
+  grepl("2 not checked", format(summary_bar(NA, 2L)), fixed = TRUE)
+)
 # DEBIT: 10 of 22 people have sample SD 0.5096 and population SD 0.4979, which
 # may be entered as proportions or as percentages.
 r <- evaluate("45.5", "0.498", "22", type = "Percentage")
@@ -1410,7 +1415,8 @@ shiny::testServer(app, {
   session$setInputs(gb_n_1 = "2000")
   stopifnot(shows(output$gb_badge_1, "Uninformative GRIM", "3 decimal places"))
 
-  # Two rows: counted separately, numbered in the CSV, errors not counted.
+  # Two rows: counted separately, numbered in the CSV. A row with an error is
+  # counted as not checked.
   session$setInputs(
     gb_type_2 = "Whole-number mean",
     gb_x_2 = "5.21",
@@ -1427,7 +1433,8 @@ shiny::testServer(app, {
       output$gb_summary,
       "2 cases tested",
       "1 consistent",
-      "1 inconsistent"
+      "1 inconsistent",
+      "1 not checked"
     ),
     shows(output$gb_badge_3, "Mean must be a number")
   )
