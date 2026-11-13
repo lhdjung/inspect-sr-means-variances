@@ -54,6 +54,8 @@ r <- evaluate("3.58", "0", "24")
 stopifnot(isFALSE(r$ok), identical(r$reasons, "SD fails GRIMMER (test 1)"))
 r <- evaluate("1.0", "2.0", "2")
 stopifnot(isFALSE(r$ok), identical(r$reasons, "SD fails GRIMMER (test 1)"))
+# A mean times N beyond integer range: 50,000 values of 100000.
+stopifnot(isTRUE(evaluate("100000.00", "0.00", "50000")$ok))
 # DEBIT: 10 of 22 people have sample SD 0.5096 and population SD 0.4979, which
 # may be entered as proportions or as percentages.
 r <- evaluate("45.5", "0.498", "22", type = "Percentage")
@@ -1083,6 +1085,11 @@ stopifnot(
   hundredth_string(" 45.5 ") == "0.455",
   hundredth_string("7") == "0.07"
 )
+
+# A combined N beyond integer range keeps Student's test: its p is .447.
+stopifnot(isTRUE(
+  run_t_test("5.23", "2.1", "2147483647", "4.10", "1.9", "2", p = "0.45")$inbounds
+))
 
 section("t-test p values from 500 simulated data sets")
 

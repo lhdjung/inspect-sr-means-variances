@@ -134,8 +134,10 @@ safe_grimmer <- function(
   }
   # grimmer() itself returns a bare logical; only grimmer_map()'s `reason`
   # column says which sub-test failed.
+  # `n` goes in as a double: scrutiny multiplies it by the mean, which
+  # overflows integer arithmetic once mean * N passes about 2.1 billion.
   r <- grimmer_map(
-    tibble::tibble(x = x, sd = sd, n = n),
+    tibble::tibble(x = x, sd = sd, n = as.numeric(n)),
     digits_x = dx,
     digits_sd = ds,
     items_averaged = it,
@@ -682,8 +684,9 @@ evaluate_pair_t_test <- function(
   if (sd1 < 0 || sd2 < 0) {
     return(list(status = "error", msg = "SD cannot be negative"))
   }
-  n1 <- as.integer(n1)
-  n2 <- as.integer(n2)
+  # N stays a double: recalc computes n1 + n2 - 2, which overflows integer
+  # arithmetic for a combined N above about 2.1 billion and silently drops
+  # Student's test.
 
   # A percentage's SD may be entered as a proportion (0.51) next to a mean in
   # per cent (45.5), as the DEBIT check allows. The t-test needs both on one
