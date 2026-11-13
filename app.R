@@ -696,15 +696,21 @@ evaluate_pair_t_test <- function(
   # more decimal places.
   # ponytail: an SD of at most 1 counts as a proportion, as in safe_debit().
   # In percentage points that needs a percentage below 0.01 or above 99.99.
+  # An SD of 0 is the same on both scales, so it does not decide the scale:
+  # read as a proportion, "0.0" next to "50.3" would coarsen 0.503 to 0.5.
   is_pct <- c(isTRUE(type1 == "Percentage"), isTRUE(type2 == "Percentage"))
-  if (any(is_pct & c(sd1, sd2) <= 1)) {
+  if (any(is_pct & c(sd1, sd2) > 0 & c(sd1, sd2) <= 1)) {
     if (!all(is_pct)) {
       return(list(status = "error", msg = T_TEST_PCT_MSG))
     }
     m1s <- hundredth_string(m1s)
     m2s <- hundredth_string(m2s)
-    if (sd1 > 1) sd1s <- hundredth_string(sd1s)
-    if (sd2 > 1) sd2s <- hundredth_string(sd2s)
+    if (sd1 > 1) {
+      sd1s <- hundredth_string(sd1s)
+    }
+    if (sd2 > 1) {
+      sd2s <- hundredth_string(sd2s)
+    }
     m1 <- parse_number(m1s)
     m2 <- parse_number(m2s)
     sd1 <- parse_number(sd1s)
@@ -2099,9 +2105,9 @@ ui <- page_navbar(
           ),
           p(
             tags$strong("t-test recalculation between paired Group rows:"),
-            "Each pair of rows that shares a ",
-            tags$em("Label"),
-            " is treated as the two arms of an independent-samples comparison",
+            "The two rows of each variable (its two groups, which share one",
+            tags$em("Label", .noWS = "after"),
+            ") are treated as the two arms of an independent-samples comparison",
             " (e.g., intervention vs. control). When both rows have a Mean, SD",
             " and N, the app recalculates the range of two-sided t-test",
             " p-values that are compatible with those summary statistics, using",
@@ -2126,8 +2132,9 @@ ui <- page_navbar(
             "If you enter a ",
             tags$em("Reported p"),
             " on the first row of the pair, the app checks whether that",
-            " reported value falls inside the recalculated range (after rounding",
-            " both to the reported p's precision):"
+            " reported value is compatible with the recalculated range. A p",
+            " reported with \"=\" is taken as rounded, so it is compatible if",
+            " some possible p rounds to it; for an inequality, see below:"
           ),
           tags$ul(
             tags$li(
@@ -2847,8 +2854,17 @@ server <- function(input, output, session) {
     summarise_rows(lapply(rids, row_result_from_inputs))
   })
 
+  # Whether group `side` ("a" or "b") of pair `p` has a mean. Only pairs with
+  # one are summarised and written to the CSV, so that both count the same
+  # pairs: a pair with nothing but an invalid reported p is left out of both.
+  has_mean <- function(p, side) {
+    xv <- input[[paste0("cb_x_", p, side)]]
+    !is.null(xv) && nzchar(trimws(xv))
+  }
+  pair_has_mean <- function(p) has_mean(p, "a") || has_mean(p, "b")
+
   output$t_test_summary <- renderUI({
-    s <- pairs()
+    s <- Filter(pair_has_mean, pairs())
     tts <- lapply(s, function(p) t_test_results[[p]]())
     t_test_summary_bar(tts)
   })
@@ -2873,18 +2889,14 @@ server <- function(input, output, session) {
         # A pair contributes rows only if at least one side has a mean. When the
         # Variable / Group cells are left blank, fall back to incremental values:
         # Variable is numbered per emitted pair, Group 1/2 within the pair.
-        has_data <- function(side) {
-          xv <- input[[paste0("cb_x_", p, side)]]
-          !is.null(xv) && nzchar(trimws(xv))
-        }
-        if (!has_data("a") && !has_data("b")) {
+        if (!pair_has_mean(p)) {
           return(NULL)
         }
         pair_counter <<- pair_counter + 1L
         # The pair-level fields (label, reported p, t-test result) go on the
         # pair's first emitted row, which is the second group's row if the
         # first group has no mean.
-        first_side <- if (has_data("a")) "a" else "b"
+        first_side <- if (has_mean(p, "a")) "a" else "b"
         var_val <- if (!is.null(variable) && nzchar(trimws(variable))) {
           trimws(variable)
         } else {

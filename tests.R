@@ -74,7 +74,13 @@ stopifnot(
   isTRUE(evaluate("45.5", "0.510", "22", type = "Percentage")$ok),
   isTRUE(evaluate("45.5", "51.0", "22", type = "Percentage")$ok),
   isTRUE(
-    evaluate("45.5", "0.498", "22", type = "Percentage", sd_meaning = "sd_pop")$ok
+    evaluate(
+      "45.5",
+      "0.498",
+      "22",
+      type = "Percentage",
+      sd_meaning = "sd_pop"
+    )$ok
   ),
   identical(
     evaluate("45.4", "0.510", "22", type = "Percentage")$reasons,
@@ -94,7 +100,17 @@ stopifnot(
 # The t-test only takes sample SDs.
 stopifnot(
   identical(
-    evaluate_pair_t_test("4.0", "1.0", "20", "4.5", "1.1", "20", "", "equals", "se")$status,
+    evaluate_pair_t_test(
+      "4.0",
+      "1.0",
+      "20",
+      "4.5",
+      "1.1",
+      "20",
+      "",
+      "equals",
+      "se"
+    )$status,
     "skipped"
   ),
   identical(
@@ -361,7 +377,13 @@ grimmer_cases <- lapply(1:3000, function(i) {
   pop <- runif(1) < .3
   list(
     x = fmt(mean(d) + (runif(1) < .3) * sample(c(-1, 1), 1) * 10^-dx, dx),
-    sd = fmt(max(sd(d) * (if (pop) sqrt((n - 1) / n) else 1) + sample(-4:4, 1) * 10^-ds, 0), ds),
+    sd = fmt(
+      max(
+        sd(d) * (if (pop) sqrt((n - 1) / n) else 1) + sample(-4:4, 1) * 10^-ds,
+        0
+      ),
+      ds
+    ),
     n = n,
     items = items,
     pop = pop
@@ -1060,25 +1082,100 @@ stopifnot(isTRUE(r$inbounds), r$min_p < p_true, abs(r$min_p - 0.006588) < 1e-6)
 
 # The threshold of an inequality is exact. The lowest possible p here is
 # .054 and the highest in the second pair .048, both of which round to .05.
-r <- run_t_test("5.08", "2.1", "30", "4.10", "1.9", "30", p = "0.05", op = "less_than")
+r <- run_t_test(
+  "5.08",
+  "2.1",
+  "30",
+  "4.10",
+  "1.9",
+  "30",
+  p = "0.05",
+  op = "less_than"
+)
 stopifnot(isFALSE(r$inbounds), r$min_p > 0.054, r$min_p < 0.055)
-r <- run_t_test("5.18", "2.1", "30", "4.10", "1.9", "30", p = "0.05", op = "greater_than")
+r <- run_t_test(
+  "5.18",
+  "2.1",
+  "30",
+  "4.10",
+  "1.9",
+  "30",
+  p = "0.05",
+  op = "greater_than"
+)
 stopifnot(isFALSE(r$inbounds), r$max_p < 0.049)
 stopifnot(
-  isTRUE(run_t_test("5.08", "2.1", "30", "4.10", "1.9", "30", p = "0.06", op = "less_than")$inbounds),
-  isTRUE(run_t_test("5.08", "2.1", "30", "4.10", "1.9", "30", p = "0.05", op = "equals")$inbounds),
+  isTRUE(
+    run_t_test(
+      "5.08",
+      "2.1",
+      "30",
+      "4.10",
+      "1.9",
+      "30",
+      p = "0.06",
+      op = "less_than"
+    )$inbounds
+  ),
+  isTRUE(
+    run_t_test(
+      "5.08",
+      "2.1",
+      "30",
+      "4.10",
+      "1.9",
+      "30",
+      p = "0.05",
+      op = "equals"
+    )$inbounds
+  ),
   # Touching mean intervals allow a difference of 0, so p = 1.
-  isTRUE(run_t_test("5.2", "0.5", "6", "5.3", "0.4", "40", p = "1", op = "greater_than_or_equal_to")$inbounds),
-  isFALSE(run_t_test("5.2", "0.5", "6", "5.3", "0.4", "40", p = "1", op = "greater_than")$inbounds)
+  isTRUE(
+    run_t_test(
+      "5.2",
+      "0.5",
+      "6",
+      "5.3",
+      "0.4",
+      "40",
+      p = "1",
+      op = "greater_than_or_equal_to"
+    )$inbounds
+  ),
+  isFALSE(
+    run_t_test(
+      "5.2",
+      "0.5",
+      "6",
+      "5.3",
+      "0.4",
+      "40",
+      p = "1",
+      op = "greater_than"
+    )$inbounds
+  )
 )
 
 # Percentages whose SDs are entered as proportions: 10 of 22 against 12 of 22
 # people have SD 0.51 (51.0 percentage points) and p = .557, on either scale.
-p_true <- t.test(rep(1:0, c(10, 12)), rep(1:0, c(12, 10)), var.equal = TRUE)$p.value
+p_true <- t.test(
+  rep(1:0, c(10, 12)),
+  rep(1:0, c(12, 10)),
+  var.equal = TRUE
+)$p.value
 pct_t_test <- function(sd1, sd2, type2 = "Percentage") {
   evaluate_pair_t_test(
-    "45.5", sd1, "22", "54.5", sd2, "22", "0.56", "equals", "sd_sample",
-    "Percentage", type2
+    "45.5",
+    sd1,
+    "22",
+    "54.5",
+    sd2,
+    "22",
+    "0.56",
+    "equals",
+    "sd_sample",
+    "Percentage",
+    type2
   )
 }
 for (r in list(
@@ -1086,8 +1183,36 @@ for (r in list(
   pct_t_test("51.0", "51.0"),
   pct_t_test("0.51", "51.0")
 )) {
-  stopifnot(isTRUE(r$inbounds), r$min_p < p_true, p_true < r$max_p, r$max_p < 0.6)
+  stopifnot(
+    isTRUE(r$inbounds),
+    r$min_p < p_true,
+    p_true < r$max_p,
+    r$max_p < 0.6
+  )
 }
+# An SD of 0 does not decide the scale. 0 of 20 against 8 of 20 people, SDs in
+# percentage points: read as a proportion, "0.0" coarsened 50.3 (0.503) to 0.5
+# and widened the range to [.0003, .0043], letting a wrong p = .004 pass.
+r <- evaluate_pair_t_test(
+  "0.0",
+  "0.0",
+  "20",
+  "40.0",
+  "50.3",
+  "20",
+  "0.004",
+  "equals",
+  "sd_sample",
+  "Percentage",
+  "Percentage"
+)
+stopifnot(
+  isFALSE(r$inbounds),
+  isFALSE(r$mixed_digits),
+  r$max_p < 0.0022,
+  r$min_p < t.test(rep(0, 20), rep(1:0, c(8, 12)), var.equal = TRUE)$p.value
+)
+
 stopifnot(
   pct_t_test("0.51", "0.51", type2 = "Any mean")$msg == T_TEST_PCT_MSG,
   isTRUE(pct_t_test("51.0", "51.0", type2 = "Any mean")$inbounds),
@@ -1097,7 +1222,15 @@ stopifnot(
 
 # A combined N beyond integer range keeps Student's test: its p is .447.
 stopifnot(isTRUE(
-  run_t_test("5.23", "2.1", "2147483647", "4.10", "1.9", "2", p = "0.45")$inbounds
+  run_t_test(
+    "5.23",
+    "2.1",
+    "2147483647",
+    "4.10",
+    "1.9",
+    "2",
+    p = "0.45"
+  )$inbounds
 ))
 
 section("t-test p values from 500 simulated data sets")
@@ -1298,7 +1431,16 @@ t_mismatch <- function(cases) {
 # Welch's lowest p lies inside the SD intervals. The random cases rarely get
 # there. Each reported p is attainable only below the lowest p at the corners.
 welch_case <- function(m1, s1, n1, m2, s2, n2, p) {
-  list(m1 = m1, s1 = s1, n1 = n1, m2 = m2, s2 = s2, n2 = n2, op = "equals", p = p)
+  list(
+    m1 = m1,
+    s1 = s1,
+    n1 = n1,
+    m2 = m2,
+    s2 = s2,
+    n2 = n2,
+    op = "equals",
+    p = p
+  )
 }
 t_cases <- c(
   t_cases,
@@ -1492,8 +1634,18 @@ shiny::testServer(app, {
     csv$group == "2",
     csv$reported_p == "1.5",
     csv$p_note == "Reported p must be between 0 and 1",
-    shows(output$cb_t_test_1, "Reported p must be between 0 and 1")
+    shows(output$cb_t_test_1, "Reported p must be between 0 and 1"),
+    shows(output$t_test_summary, "1 not checked")
   )
+  # A pair with nothing but an invalid reported p shows its warning but, as in
+  # the CSV, is not counted in the summary.
+  session$setInputs(cb_p_2 = "abc")
+  stopifnot(
+    shows(output$cb_t_test_2, "Reported p must be a number"),
+    shows(output$t_test_summary, "1 not checked"),
+    nrow(read.csv(output$download_csv)) == 1
+  )
+  session$setInputs(cb_p_2 = "")
 
   # Disjoint Student's and Welch's ranges are spelled out in the CSV.
   session$setInputs(
