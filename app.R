@@ -15,7 +15,7 @@ MAX_PAIRS <- 15
 MAX_ROWS <- 15
 
 # Bump this and add an entry to the "Changelog" tab with every deployment.
-APP_VERSION <- "0.3.0"
+APP_VERSION <- "0.3.1"
 
 # Each Type label states what it assumes about the raw data, so that GRIM and
 # GRIMMER only run when the user picks one of the two whole-number options.
@@ -2214,7 +2214,42 @@ ui <- page_navbar(
       card(
         card_header("Changelog"),
         card_body(
-          h5("0.3.0 (2026-11-05)"),
+          h5("0.3.1 (2026-11-13)"),
+          tags$ul(
+            class = "text-muted",
+            tags$li(
+              "t-test: two percentages with SDs entered as proportions (e.g.,",
+              "45.5 with SD 0.51) were compared on mismatched scales, so a",
+              "correct p was shown as \"Inconsistent\". The means are now",
+              "read as proportions in that case."
+            ),
+            tags$li(
+              "t-test: with very small groups and SDs of only a few units of",
+              "their last decimal place, the lowest possible p of Welch's",
+              "test was overestimated, so a correct p just below it could be",
+              "shown as \"Inconsistent\"."
+            ),
+            tags$li(
+              "t-test: an inequality such as \"p < .05\" was accepted when",
+              "the lowest possible p only rounded to .05 (e.g., 0.054). The",
+              "threshold is now taken as exact."
+            ),
+            tags$li(
+              "A mean times N above about 2 billion no longer stops GRIMMER",
+              "from running, and a combined N above that no longer drops",
+              "Student's t-test."
+            ),
+            tags$li(
+              "The summary lines now count rows that could not be checked.",
+              "In the CSV, such problems are in a new \"error\" column and",
+              "no longer under \"inconsistency\"."
+            ),
+            tags$li(
+              "Notes about skipped tests name DEBIT for percentages, and",
+              "adding a row beyond the maximum shows a message."
+            )
+          ),
+          h5(class = "mt-4", "0.3.0 (2026-11-05)"),
           tags$ul(
             class = "text-muted",
             tags$li(
