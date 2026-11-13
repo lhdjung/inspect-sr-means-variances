@@ -843,6 +843,7 @@ evaluate_pair_t_test <- function(
 }
 
 MIXED_DIGITS_NOTE <- "Groups differ in decimal places; coarser precision used"
+T_TEST_INCOMPLETE_MSG <- "Awaiting both groups' M, SD, N"
 T_TEST_PCT_MSG <- paste(
   "For the t-test, set Type to a percentage in both groups,",
   "or enter the SD in percentage points"
@@ -1064,7 +1065,7 @@ t_test_result_ui <- function(tt) {
       if (identical(tt$status, "skipped")) {
         tt$msg
       } else {
-        "Awaiting both groups' M, SD, N"
+        T_TEST_INCOMPLETE_MSG
       }
     ))
   }
@@ -2547,9 +2548,7 @@ server <- function(input, output, session) {
         } else {
           paste(res$tests_run, collapse = "+")
         }
-        inconsistency <- if (!is.null(res$err)) {
-          res$err
-        } else if (!is.na(res$ok) && !res$ok) {
+        inconsistency <- if (is.null(res$err) && isFALSE(res$ok)) {
           paste(res$reasons, collapse = "; ")
         } else {
           ""
@@ -2578,6 +2577,7 @@ server <- function(input, output, session) {
           test = test_label,
           consistent = res$ok,
           inconsistency = inconsistency,
+          error = res$err %||% "",
           notes = notes,
           stringsAsFactors = FALSE
         )
@@ -2597,6 +2597,7 @@ server <- function(input, output, session) {
           test = character(),
           consistent = logical(),
           inconsistency = character(),
+          error = character(),
           notes = character(),
           stringsAsFactors = FALSE
         )
@@ -2855,9 +2856,7 @@ server <- function(input, output, session) {
           } else {
             paste(res$tests_run, collapse = "+")
           }
-          inconsistency <- if (!is.null(res$err)) {
-            res$err
-          } else if (!is.na(res$ok) && !res$ok) {
+          inconsistency <- if (is.null(res$err) && isFALSE(res$ok)) {
             paste(res$reasons, collapse = "; ")
           } else {
             ""
@@ -2894,6 +2893,7 @@ server <- function(input, output, session) {
             test = test_label,
             consistent = res$ok,
             inconsistency = inconsistency,
+            error = res$err %||% "",
             p_operator = if (
               is_first && !is.null(p_str) && nzchar(trimws(p_str))
             ) {
@@ -2917,6 +2917,8 @@ server <- function(input, output, session) {
             },
             p_note = if (is_first && tt$status %in% c("error", "skipped")) {
               tt$msg
+            } else if (is_first && identical(tt$status, "incomplete")) {
+              T_TEST_INCOMPLETE_MSG
             } else if (is_first && tt_ok) {
               # recalc_p_min and recalc_p_max span all ranges; name them when
               # there is a gap, since a reported p inside it is not reproduced.
@@ -2961,6 +2963,7 @@ server <- function(input, output, session) {
           test = character(),
           consistent = logical(),
           inconsistency = character(),
+          error = character(),
           p_operator = character(),
           reported_p = character(),
           recalc_p_min = numeric(),

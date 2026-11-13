@@ -1416,7 +1416,7 @@ shiny::testServer(app, {
   stopifnot(shows(output$gb_badge_1, "Uninformative GRIM", "3 decimal places"))
 
   # Two rows: counted separately, numbered in the CSV. A row with an error is
-  # counted as not checked.
+  # counted as not checked, and its message is not listed as an inconsistency.
   session$setInputs(
     gb_type_2 = "Whole-number mean",
     gb_x_2 = "5.21",
@@ -1428,7 +1428,8 @@ shiny::testServer(app, {
   stopifnot(
     identical(csv$label, c("1", "2", "3")),
     identical(csv$consistent, c("TRUE", "FALSE", NA)),
-    csv$inconsistency[3] == "Mean must be a number",
+    csv$inconsistency[3] == "",
+    csv$error[3] == "Mean must be a number",
     shows(
       output$gb_summary,
       "2 cases tested",
