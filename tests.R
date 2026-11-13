@@ -56,8 +56,12 @@ r <- evaluate("1.0", "2.0", "2")
 stopifnot(isFALSE(r$ok), identical(r$reasons, "SD fails GRIMMER (test 1)"))
 # A mean times N beyond integer range: 50,000 values of 100000.
 stopifnot(isTRUE(evaluate("100000.00", "0.00", "50000")$ok))
-# The summary counts rows that could not be checked.
+# Without N, the note names the SD test that applies to the type.
 stopifnot(
+  identical(
+    evaluate("45", "1.20", type = "Percentage")$notes,
+    "Awaiting N for GRIM/DEBIT"
+  ),
   is.null(summary_bar(NA)),
   grepl("2 not checked", format(summary_bar(NA, 2L)), fixed = TRUE)
 )

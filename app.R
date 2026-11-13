@@ -382,7 +382,7 @@ validate_combined_row <- function(
 # - grim_digits: decimal places GRIM worked with (for the uninformative label)
 evaluate_row <- function(...) {
   # A test that throws could not be run, e.g. because scrutiny refuses inputs
-  # beyond its exact range (N above about a million for GRIMMER) or after a
+  # beyond its exact range (N of about 100 million for GRIMMER) or after a
   # breaking change in scrutiny. Report that as an error instead of quietly
   # showing a verdict based on the remaining tests.
   tryCatch(
@@ -525,6 +525,7 @@ evaluate_row_unsafe <- function(
   # Bhatia–Davis SD bound is skipped too, leaving just the mean's bounds.
   n_given <- !is.null(n_str) && nzchar(trimws(n_str))
   sd_bound_skipped <- both_bounds && sd_given && !n_given
+  sd_test <- if (is_percent) "DEBIT" else "GRIMMER"
   scope <- if (!both_bounds) {
     "Mean bound only"
   } else if (sd_bound_skipped) {
@@ -546,11 +547,12 @@ evaluate_row_unsafe <- function(
     notes <- c(
       notes,
       if (length(tests_run) == 0) {
-        "Awaiting N for GRIM/GRIMMER"
+        paste0("Awaiting N for GRIM/", sd_test)
       } else {
         paste0(
           scope,
-          "; GRIM/GRIMMER",
+          "; GRIM/",
+          sd_test,
           if (sd_bound_skipped) " and SD bound",
           " need N"
         )
@@ -1134,7 +1136,7 @@ summary_bar <- function(results_vec, n_err = 0L) {
     style = "background:#f1f3f5; font-size:.875rem; border-left:3px solid #dee2e6;",
     span(
       class = "text-muted fw-semibold",
-      "GRIM / GRIMMER / Bounds:"
+      "GRIM / GRIMMER / DEBIT / Bounds:"
     ),
     span(
       class = "text-muted",
@@ -1226,7 +1228,7 @@ remove_button <- function(id) {
     ),
     class = "btn btn-sm p-1 rm-btn",
     style = "line-height:1;",
-    title = "Remove this variable pair"
+    title = "Remove"
   )
 }
 
@@ -1444,7 +1446,7 @@ combined_header <- div(
   div(class = "grid-hdr", "Logical Max (optional)"),
   div(class = "grid-hdr", "p operator"),
   div(class = "grid-hdr", "Reported p (optional)"),
-  div(class = "grid-hdr", "Result (GRIM / GRIMMER / Bounds)"),
+  div(class = "grid-hdr", "Result (GRIM / GRIMMER / DEBIT / Bounds)"),
   div(class = "grid-hdr", "Result (p value)"),
   div()
 )
@@ -1984,7 +1986,8 @@ ui <- page_navbar(
             br(),
             tags$ul(
               tags$li(
-                "\"Mean fails GRIM\": mean and sample size are inconsistent."
+                "\"Mean fails GRIM\" (or \"Percentage fails GRIM\"): mean and",
+                "sample size are inconsistent."
               ),
               tags$li(
                 "\"SD fails GRIMMER\": mean, SD, and sample size are inconsistent.",
@@ -2011,7 +2014,12 @@ ui <- page_navbar(
                 " round to the reported values."
               )
             ),
-            "If multiple checks fail, all failing reasons are listed.",
+            "If multiple checks fail, all failing reasons are listed, except",
+            "that a mean or percentage failing GRIM is not also reported as",
+            "failing GRIMMER or DEBIT: its SD cannot be tested then.",
+            "An orange warning instead of a result means that the row could",
+            "not be checked, because of a problem with the input or because",
+            "the numbers are too large for an exact test.",
             br(),
             br(),
             "GRIMMER is GRIM plus 3 additional tests:",
@@ -2078,7 +2086,7 @@ ui <- page_navbar(
             "percentages, such as a mean percent score. The default,",
             tags$em("Any mean", .noWS = "after"),
             ", only runs the Bounds checks, so a \"Consistent\" result then",
-            "refers to the bounds alone. Likewise, GRIM, GRIMMER and the Bhatia–Davis SD",
+            "refers to the bounds alone. Likewise, GRIM, GRIMMER, DEBIT and the Bhatia–Davis SD",
             "bound need the sample size; without it, only the mean's bounds",
             "are checked. A note next to the result names any skipped tests.",
             "Enter N as plain digits, without separators (e.g., 2000, not",
@@ -2217,7 +2225,7 @@ ui <- page_navbar(
               "one for the given mean and N."
             ),
             tags$li(
-              "Inputs too large for an exact test, such as N above about a",
+              "Inputs too large for an exact test, such as N of about 100",
               "million for GRIMMER, are reported as \"Test could not run\"."
             ),
             tags$li(
