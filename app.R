@@ -2431,7 +2431,14 @@ server <- function(input, output, session) {
   observeEvent(input$gb_add, {
     s <- gb_slots()
     ns <- next_free_slot(s, MAX_ROWS)
-    if (!is.null(ns)) gb_slots(sort(c(s, ns)))
+    if (is.null(ns)) {
+      showNotification(
+        paste("At most", MAX_ROWS, "rows. Download the CSV and start again."),
+        type = "warning"
+      )
+    } else {
+      gb_slots(sort(c(s, ns)))
+    }
   })
 
   for (i in seq_len(MAX_ROWS)) {
@@ -2652,7 +2659,18 @@ server <- function(input, output, session) {
   observeEvent(input$combined_add, {
     s <- pairs()
     ns <- next_free_slot(s, MAX_PAIRS)
-    if (!is.null(ns)) pairs(sort(c(s, ns)))
+    if (is.null(ns)) {
+      showNotification(
+        paste(
+          "At most",
+          MAX_PAIRS,
+          "variables. Download the CSV and start again."
+        ),
+        type = "warning"
+      )
+    } else {
+      pairs(sort(c(s, ns)))
+    }
   })
 
   # Read the GRIM/GRIMMER/Bounds inputs for one row id stem (e.g. "1a").
