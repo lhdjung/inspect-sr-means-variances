@@ -1041,6 +1041,20 @@ stopifnot(isTRUE(
   )$inbounds
 ))
 
+# The threshold of an inequality is exact. The lowest possible p here is
+# .054 and the highest in the second pair .048, both of which round to .05.
+r <- run_t_test("5.08", "2.1", "30", "4.10", "1.9", "30", p = "0.05", op = "less_than")
+stopifnot(isFALSE(r$inbounds), r$min_p > 0.054, r$min_p < 0.055)
+r <- run_t_test("5.18", "2.1", "30", "4.10", "1.9", "30", p = "0.05", op = "greater_than")
+stopifnot(isFALSE(r$inbounds), r$max_p < 0.049)
+stopifnot(
+  isTRUE(run_t_test("5.08", "2.1", "30", "4.10", "1.9", "30", p = "0.06", op = "less_than")$inbounds),
+  isTRUE(run_t_test("5.08", "2.1", "30", "4.10", "1.9", "30", p = "0.05", op = "equals")$inbounds),
+  # Touching mean intervals allow a difference of 0, so p = 1.
+  isTRUE(run_t_test("5.2", "0.5", "6", "5.3", "0.4", "40", p = "1", op = "greater_than_or_equal_to")$inbounds),
+  isFALSE(run_t_test("5.2", "0.5", "6", "5.3", "0.4", "40", p = "1", op = "greater_than")$inbounds)
+)
+
 # Percentages whose SDs are entered as proportions: 10 of 22 against 12 of 22
 # people have SD 0.51 (51.0 percentage points) and p = .557, on either scale.
 p_true <- t.test(rep(1:0, c(10, 12)), rep(1:0, c(12, 10)), var.equal = TRUE)$p.value
@@ -1128,13 +1142,15 @@ stopifnot(
   format_p_value(0) == "<0.001"
 )
 
-section("t-test ranges against brute force (120 cases) and 3 mutants")
+section("t-test ranges against brute force (120 cases) and 4 mutants")
 
 # Any true means and SDs within the rounding intervals are possible. Student's
 # and Welch's p over a grid of them, corners included (where p is at its
 # extremes, up to a relative 1e-5 for Welch), must match the app's range, and a
-# reported p must count as reproduced exactly when its own rounding interval
-# reaches one of the two methods' ranges. When the groups differ in decimal
+# p reported with "=" must count as reproduced exactly when its own rounding
+# interval reaches one of the two methods' ranges. The threshold of an
+# inequality is exact, so "p < .05" needs a possible p below .05. When the
+# groups differ in decimal
 # places, the finer value is first widened as the app does: to every value
 # that rounds, either way, to the coarser precision.
 interval_at <- function(v, d) {
@@ -1239,11 +1255,11 @@ t_mismatch <- function(cases) {
     reaches <- switch(
       k$op,
       equals = rg[1, ] <= p + h & rg[2, ] >= p - h,
-      less_than = rg[1, ] < p + h,
-      greater_than = rg[2, ] > p - h
+      less_than = rg[1, ] < p,
+      greater_than = rg[2, ] > p
     )
     # Skip the verdict where a range ends too close to call on the grid.
-    edge <- any(abs(outer(c(rg), c(p - h, p + h), "-")) <= 1e-4 * c(rg))
+    edge <- any(abs(outer(c(rg), c(p - h, p, p + h), "-")) <= 1e-4 * c(rg))
     if (
       r$status != "ok" ||
         !near(r$min_p, min(rg[1, ])) ||
@@ -1271,8 +1287,13 @@ expect_caught(
     ),
     max_p_from_first_combination = mutate(
       evaluate_pair_t_test,
-      "max_p <- max(vapply(reps, function(r) r$max_p, numeric(1)))",
-      "max_p <- reps[[1]]$max_p"
+      "max_p <- max(intervals$p_max)",
+      "max_p <- max(reps[[1]]$method_intervals$p_max)"
+    ),
+    inequality_threshold_rounded = mutate(
+      evaluate_pair_t_test,
+      "less_than = min_p < p_num,",
+      "less_than = min_p < p_num + half_p,"
     ),
     zero_sd_skipped = mutate(
       evaluate_pair_t_test,

@@ -766,18 +766,39 @@ evaluate_pair_t_test <- function(
   # Student's and Welch's tests each give their own range of possible p, and
   # the two need not overlap. A reported p in the gap between them is not
   # reproduced, so the ranges are kept apart instead of shown as one span.
-  ranges <- merge_ranges(
-    do.call(
-      rbind,
-      lapply(reps, function(r) r$method_intervals[c("p_min", "p_max")])
-    ),
-    p_digits
+  intervals <- do.call(
+    rbind,
+    lapply(reps, function(r) {
+      as.data.frame(r$method_intervals[c("p_min", "p_max")])
+    })
   )
-  reps <- lapply(reps, function(r) r$reproduced)
-  min_p <- min(vapply(reps, function(r) r$min_p, numeric(1)))
-  max_p <- max(vapply(reps, function(r) r$max_p, numeric(1)))
-  if (anyNA(c(min_p, max_p)) || is.null(ranges)) {
+  if (is.null(intervals) || nrow(intervals) == 0 || anyNA(intervals)) {
     return(list(status = "error", msg = "Could not recalculate"))
+  }
+  ranges <- merge_ranges(intervals, p_digits)
+  min_p <- min(intervals$p_min)
+  max_p <- max(intervals$p_max)
+
+  # The verdict is worked out here, not taken from recalc (0.6), which rounds
+  # the ends of the range before comparing them with an inequality's threshold
+  # and so lets "p < .05" pass when the smallest possible p is .054.
+  # A p reported with "=" is rounded, so it is reproduced if its rounding
+  # interval reaches one of the ranges. A threshold is exact.
+  inbounds <- NA
+  if (p_given) {
+    half_p <- 0.5 * 10^-p_digits
+    eps <- 1e-9
+    inbounds <- switch(
+      p_operator,
+      less_than = min_p < p_num,
+      less_than_or_equal_to = min_p <= p_num + eps,
+      greater_than = max_p > p_num,
+      greater_than_or_equal_to = max_p >= p_num - eps,
+      any(
+        intervals$p_min <= p_num + half_p + eps &
+          intervals$p_max >= p_num - half_p - eps
+      )
+    )
   }
 
   list(
@@ -787,11 +808,7 @@ evaluate_pair_t_test <- function(
     min_p = min_p,
     max_p = max_p,
     ranges = ranges,
-    inbounds = if (p_given) {
-      any(vapply(reps, function(r) isTRUE(r$p_inbounds), logical(1)))
-    } else {
-      NA
-    },
+    inbounds = inbounds,
     p_digits = p_digits,
     p_operator = p_operator,
     mixed_digits = mixed_digits
@@ -2046,7 +2063,9 @@ ui <- page_navbar(
             " and ",
             tags$em(">="),
             " check the reported inequality against that range (useful when a",
-            " paper reports, e.g., \"p < .001\").",
+            " paper reports, e.g., \"p < .001\"). The threshold of an",
+            " inequality is taken as exact: \"p < .05\" is only consistent",
+            " if some possible p is below 0.05.",
             br(),
             br(),
             "If no reported p is entered, the app simply shows the recalculated",
