@@ -1041,6 +1041,29 @@ stopifnot(isTRUE(
   )$inbounds
 ))
 
+# Percentages whose SDs are entered as proportions: 10 of 22 against 12 of 22
+# people have SD 0.51 (51.0 percentage points) and p = .557, on either scale.
+p_true <- t.test(rep(1:0, c(10, 12)), rep(1:0, c(12, 10)), var.equal = TRUE)$p.value
+pct_t_test <- function(sd1, sd2, type2 = "Percentage") {
+  evaluate_pair_t_test(
+    "45.5", sd1, "22", "54.5", sd2, "22", "0.56", "equals", "sd_sample",
+    "Percentage", type2
+  )
+}
+for (r in list(
+  pct_t_test("0.51", "0.51"),
+  pct_t_test("51.0", "51.0"),
+  pct_t_test("0.51", "51.0")
+)) {
+  stopifnot(isTRUE(r$inbounds), r$min_p < p_true, p_true < r$max_p, r$max_p < 0.6)
+}
+stopifnot(
+  pct_t_test("0.51", "0.51", type2 = "Any mean")$msg == T_TEST_PCT_MSG,
+  isTRUE(pct_t_test("51.0", "51.0", type2 = "Any mean")$inbounds),
+  hundredth_string(" 45.5 ") == "0.455",
+  hundredth_string("7") == "0.07"
+)
+
 section("t-test p values from 500 simulated data sets")
 
 # p values recalculated from genuine data, by Student's or Welch's test,

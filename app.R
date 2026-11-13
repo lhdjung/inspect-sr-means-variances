@@ -618,7 +618,9 @@ evaluate_pair_t_test <- function(
   n2s,
   p_str,
   p_operator = "equals",
-  sd_meaning = "sd_sample"
+  sd_meaning = "sd_sample",
+  type1 = NULL,
+  type2 = NULL
 ) {
   if (is.null(p_operator) || !nzchar(p_operator)) {
     p_operator <- "equals"
@@ -682,6 +684,27 @@ evaluate_pair_t_test <- function(
   }
   n1 <- as.integer(n1)
   n2 <- as.integer(n2)
+
+  # A percentage's SD may be entered as a proportion (0.51) next to a mean in
+  # per cent (45.5), as the DEBIT check allows. The t-test needs both on one
+  # scale, so percentage groups are then re-expressed as proportions, with two
+  # more decimal places.
+  # ponytail: an SD of at most 1 counts as a proportion, as in safe_debit().
+  # In percentage points that needs a percentage below 0.01 or above 99.99.
+  is_pct <- c(isTRUE(type1 == "Percentage"), isTRUE(type2 == "Percentage"))
+  if (any(is_pct & c(sd1, sd2) <= 1)) {
+    if (!all(is_pct)) {
+      return(list(status = "error", msg = T_TEST_PCT_MSG))
+    }
+    m1s <- hundredth_string(m1s)
+    m2s <- hundredth_string(m2s)
+    if (sd1 > 1) sd1s <- hundredth_string(sd1s)
+    if (sd2 > 1) sd2s <- hundredth_string(sd2s)
+    m1 <- parse_number(m1s)
+    m2 <- parse_number(m2s)
+    sd1 <- parse_number(sd1s)
+    sd2 <- parse_number(sd2s)
+  }
 
   # Reported p was already validated to lie in [0, 1] above.
   p_given <- !is.null(p_str) && nzchar(trimws(p_str))
@@ -776,6 +799,21 @@ evaluate_pair_t_test <- function(
 }
 
 MIXED_DIGITS_NOTE <- "Groups differ in decimal places; coarser precision used"
+T_TEST_PCT_MSG <- paste(
+  "For the t-test, set Type to a percentage in both groups,",
+  "or enter the SD in percentage points"
+)
+
+# "45.5" -> "0.455": a typed number divided by 100, keeping its precision.
+hundredth_string <- function(s) {
+  s <- trimws(s)
+  formatC(
+    parse_number(s) / 100,
+    format = "f",
+    digits = count_decimal_places(s) + 2L
+  )
+}
+
 T_TEST_SKIPPED_MSG <- "t-test needs sample SDs (see \"SD reported as\")"
 
 # Merges ranges (data frame with p_min, p_max) that overlap or touch once
@@ -2014,10 +2052,12 @@ ui <- page_navbar(
             "If no reported p is entered, the app simply shows the recalculated",
             " range. The t-test recalculation uses only the Mean, SD and N; it",
             " ignores ",
-            tags$em("Type"),
-            ", ",
             tags$em("Items"),
-            " and the bounds, which apply to GRIM / GRIMMER / Bounds only.",
+            " and the bounds, which apply to GRIM / GRIMMER / Bounds only. ",
+            tags$em("Type"),
+            " matters in one case: for two percentages whose SDs are entered",
+            " as proportions (1 or less), the means are read as proportions",
+            " too, so that both are on the same scale.",
             " Decimal precision for the means and SDs is detected automatically",
             " from the values you enter, so enter them exactly as reported,",
             " including trailing zeros. If the two groups' means (or SDs) are",
@@ -2543,7 +2583,9 @@ server <- function(input, output, session) {
       input[[paste0("cb_n_", rid_b)]],
       input[[paste0("cb_p_", p)]],
       input[[paste0("cb_pop_", p)]],
-      input$cb_sd_meaning
+      input$cb_sd_meaning,
+      input[[paste0("cb_type_", rid_a)]],
+      input[[paste0("cb_type_", rid_b)]]
     )
   }
 
