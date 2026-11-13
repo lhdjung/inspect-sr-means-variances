@@ -766,10 +766,34 @@ evaluate_pair_t_test <- function(
   # Student's and Welch's tests each give their own range of possible p, and
   # the two need not overlap. A reported p in the gap between them is not
   # reproduced, so the ranges are kept apart instead of shown as one span.
+  # recalc (0.6) evaluates only the ends and the middle of each rounding
+  # interval. Welch's p is not monotone in the SDs, so its smallest value can
+  # lie in between; it is searched for here and replaces recalc's if smaller.
+  # ponytail: drop welch_min_p() once recalc searches the SD intervals itself.
+  half_m <- 0.5 * 10^-m_digits
+  half_sd <- 0.5 * 10^-sd_digits
   intervals <- do.call(
     rbind,
-    lapply(reps, function(r) {
-      as.data.frame(r$method_intervals[c("p_min", "p_max")])
+    lapply(seq_along(reps), function(i) {
+      iv <- as.data.frame(reps[[i]]$method_intervals[c(
+        "method",
+        "p_min",
+        "p_max"
+      )])
+      welch <- startsWith(iv$method, "welch_t")
+      # `grid` holds the SDs after nonzero(); subtracting from those would
+      # still give a lower end of 0 where it matters.
+      w <- welch_min_p(
+        abs(grid$m1[i] - grid$m2[i]) + 2 * half_m,
+        pmax(grid$sd1[i] - half_sd, 0),
+        grid$sd1[i] + half_sd,
+        n1,
+        pmax(grid$sd2[i] - half_sd, 0),
+        grid$sd2[i] + half_sd,
+        n2
+      )
+      iv$p_min[welch] <- pmin(iv$p_min[welch], w)
+      iv[c("p_min", "p_max")]
     })
   )
   if (is.null(intervals) || nrow(intervals) == 0 || anyNA(intervals)) {
@@ -831,6 +855,38 @@ hundredth_string <- function(s) {
   )
 }
 
+# Smallest two-sided Welch p for a mean difference `d` when the SDs may lie
+# anywhere in [lo1, hi1] and [lo2, hi2]: a grid search, then refined from the
+# best grid point.
+welch_min_p <- function(d, lo1, hi1, n1, lo2, hi2, n2) {
+  welch_p <- function(s1, s2) {
+    v1 <- s1^2 / n1
+    v2 <- s2^2 / n2
+    df <- (v1 + v2)^2 / (v1^2 / (n1 - 1) + v2^2 / (n2 - 1))
+    p <- 2 * stats::pt(-d / sqrt(v1 + v2), df)
+    # Both SDs 0: t is infinite, so p tends to 0.
+    p[v1 + v2 <= 0] <- 0
+    p
+  }
+  g <- expand.grid(
+    s1 = seq(lo1, hi1, length.out = 41),
+    s2 = seq(lo2, hi2, length.out = 41)
+  )
+  p <- welch_p(g$s1, g$s2)
+  best <- which.min(p)
+  refined <- tryCatch(
+    stats::optim(
+      c(g$s1[best], g$s2[best]),
+      function(s) welch_p(s[1], s[2]),
+      method = "L-BFGS-B",
+      lower = c(lo1, lo2),
+      upper = c(hi1, hi2),
+      control = list(parscale = pmax(c(hi1 - lo1, hi2 - lo2), 1e-12))
+    )$value,
+    error = function(e) NA_real_
+  )
+  min(p[best], refined, na.rm = TRUE)
+}
 T_TEST_SKIPPED_MSG <- "t-test needs sample SDs (see \"SD reported as\")"
 
 # Merges ranges (data frame with p_min, p_max) that overlap or touch once

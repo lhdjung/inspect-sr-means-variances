@@ -1041,6 +1041,12 @@ stopifnot(isTRUE(
   )$inbounds
 ))
 
+# Welch's lowest p can lie inside the SD intervals. Data 4.59, 4.70 and 3.80,
+# 3.95, 4.11 have these summary statistics and a Welch p of .0075.
+p_true <- t.test(c(4.59, 4.70), c(3.80, 3.95, 4.11))$p.value
+r <- run_t_test("4.6", "0.1", "2", "4.0", "0.2", "3", p = "0.007")
+stopifnot(isTRUE(r$inbounds), r$min_p < p_true, abs(r$min_p - 0.006588) < 1e-6)
+
 # The threshold of an inequality is exact. The lowest possible p here is
 # .054 and the highest in the second pair .048, both of which round to .05.
 r <- run_t_test("5.08", "2.1", "30", "4.10", "1.9", "30", p = "0.05", op = "less_than")
@@ -1142,15 +1148,15 @@ stopifnot(
   format_p_value(0) == "<0.001"
 )
 
-section("t-test ranges against brute force (120 cases) and 4 mutants")
+section("t-test ranges against brute force (124 cases) and 5 mutants")
 
 # Any true means and SDs within the rounding intervals are possible. Student's
-# and Welch's p over a grid of them, corners included (where p is at its
-# extremes, up to a relative 1e-5 for Welch), must match the app's range, and a
-# p reported with "=" must count as reproduced exactly when its own rounding
-# interval reaches one of the two methods' ranges. The threshold of an
-# inequality is exact, so "p < .05" needs a possible p below .05. When the
-# groups differ in decimal
+# and Welch's p over a grid of them must match the app's range. The grid has
+# the corners, where p is at its extremes, except for Welch's lowest p: that
+# one can lie inside the SD intervals, so the SD axes are dense. A p reported
+# with "=" must count as reproduced exactly when its own rounding interval
+# reaches one of the two methods' ranges; the threshold of an inequality is
+# exact, so "p < .05" needs a possible p below .05. When the groups differ in decimal
 # places, the finer value is first widened as the app does: to every value
 # that rounds, either way, to the coarser precision.
 interval_at <- function(v, d) {
@@ -1178,9 +1184,9 @@ t_p <- function(m1, s1, n1, m2, s2, n2, welch) {
 t_ranges <- function(k) {
   dm <- min(decimals(k$m1), decimals(k$m2))
   ds <- min(decimals(k$s1), decimals(k$s2))
-  axis <- function(iv) seq(iv[1], iv[2], length.out = 5)
+  axis <- function(iv, n = 3) seq(iv[1], iv[2], length.out = n)
   # SD 0 itself leaves t undefined; the app also stands in 1e-8.
-  sd_axis <- function(v) axis(pmax(interval_at(v, ds), 1e-8))
+  sd_axis <- function(v) axis(pmax(interval_at(v, ds), 1e-8), 81)
   g <- expand.grid(
     m1 = axis(interval_at(k$m1, dm)),
     s1 = sd_axis(k$s1),
@@ -1272,6 +1278,22 @@ t_mismatch <- function(cases) {
   NULL
 }
 
+# Tiny groups with SDs of a few units of their last decimal place, where
+# Welch's lowest p lies inside the SD intervals. The random cases rarely get
+# there. Each reported p is attainable only below the lowest p at the corners.
+welch_case <- function(m1, s1, n1, m2, s2, n2, p) {
+  list(m1 = m1, s1 = s1, n1 = n1, m2 = m2, s2 = s2, n2 = n2, op = "equals", p = p)
+}
+t_cases <- c(
+  t_cases,
+  list(
+    welch_case("4.6", "0.1", 2, "4.0", "0.2", 3, "0.007"),
+    welch_case("5.96", "0.2", 2, "5.53", "0.4", 12, "0.04"),
+    welch_case("9.45", "0.02", 2, "9.42", "0.03", 6, "0.068"),
+    welch_case("4.24", "1", 2, "2.00", "2", 20, "0.007")
+  )
+)
+
 bad <- t_mismatch(t_cases)
 if (!is.null(bad)) {
   stop("t-test disagrees with brute force: ", deparse(bad))
@@ -1289,6 +1311,11 @@ expect_caught(
       evaluate_pair_t_test,
       "max_p <- max(intervals$p_max)",
       "max_p <- max(reps[[1]]$method_intervals$p_max)"
+    ),
+    welch_min_at_corners_only = mutate(
+      evaluate_pair_t_test,
+      "iv$p_min[welch] <- pmin(iv$p_min[welch], w)",
+      "iv$p_min[welch] <- iv$p_min[welch]"
     ),
     inequality_threshold_rounded = mutate(
       evaluate_pair_t_test,
