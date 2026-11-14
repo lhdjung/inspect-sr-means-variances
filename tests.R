@@ -743,9 +743,10 @@ stopifnot(
 stopifnot(
   identical(
     evaluate("3.45", "", "", min = "1", max = "5")$notes,
-    "Bounds only; GRIM/GRIMMER need N"
+    "Bounds only; GRIM needs N"
   ),
-  identical(evaluate("3.45")$notes, "Awaiting N for GRIM/GRIMMER"),
+  identical(evaluate("3.45")$notes, "Awaiting N for GRIM"),
+  identical(evaluate("3.45", "1.2")$notes, "Awaiting N for GRIM/GRIMMER"),
   identical(evaluate("", "1.2", "30")$notes, "Awaiting mean"),
   identical(
     evaluate("3.0", "2.5", "", min = "1", max = "5", integer = FALSE)$notes,
@@ -772,7 +773,7 @@ stopifnot(
   identical(
     r$notes,
     c(
-      "Mean bound only; GRIM/GRIMMER need N",
+      "Mean bound only; GRIM needs N",
       "Only Min given; add Max for a more informative bounds check"
     )
   )
@@ -929,6 +930,8 @@ stopifnot(
     "Percentages cannot have multiple items."
   ),
   is.null(validation_error("5.25", "", "22", items = 2)),
+  # Only GRIM and GRIMMER use Items, so "Any mean" does not need it.
+  is.null(validation_error("5.2", "", "20", items = NA, integer = FALSE)),
   identical(
     validation_error("5.2", "", "20", items = 1.5),
     "Items must be a positive whole number"
@@ -1113,6 +1116,29 @@ stopifnot(
     ),
     c(TRUE, TRUE)
   )
+)
+# A coarse p does not coarsen the range: it was shown as [<0.1, <0.1].
+r <- run_t_test("5.2", "1.1", "20", "4.1", "1.0", "20", p = ".5")
+stopifnot(
+  isFALSE(r$inbounds),
+  p_ranges_text(r$ranges, r$p_digits) == "p ∈ [0.001, 0.007]"
+)
+# A group that fails its row's checks is not t-tested, e.g. a percentage of
+# 150, which would be read as a proportion of 1.5.
+r <- evaluate_pair_t_test(
+  "150",
+  "0.20",
+  "20",
+  "40",
+  "0.20",
+  "20",
+  "",
+  type1 = "Percentage",
+  type2 = "Percentage"
+)
+stopifnot(
+  r$status == "error",
+  r$msg == "Group 1: Percentage must be between 0 and 100"
 )
 # A p without decimals is rounded to a whole number: .80 to .88 rounds to 1.
 stopifnot(

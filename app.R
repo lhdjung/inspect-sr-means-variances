@@ -340,12 +340,14 @@ validate_combined_row <- function(
     }
     if (n_num > .Machine$integer.max) return("N is too large")
   }
+  # Only GRIM and GRIMMER use Items, so "Any mean" does not need it.
   if (
-    is.null(items) ||
-      is.na(items) ||
-      items != round(items) ||
-      items < 1 ||
-      items > .Machine$integer.max
+    isTRUE(type %in% c("Whole-number mean", "Percentage")) &&
+      (is.null(items) ||
+        is.na(items) ||
+        items != round(items) ||
+        items < 1 ||
+        items > .Machine$integer.max)
   ) {
     return("Items must be a positive whole number")
   }
@@ -544,17 +546,19 @@ evaluate_row_unsafe <- function(
       if (sd_bound_skipped) "SD bound needs N"
     )
   } else if (!n_given) {
+    # Without an SD, only GRIM is waiting for N.
+    waiting <- if (sd_given) paste0("GRIM/", sd_test) else "GRIM"
     notes <- c(
       notes,
       if (length(tests_run) == 0) {
-        paste0("Awaiting N for GRIM/", sd_test)
+        paste0("Awaiting N for ", waiting)
       } else {
         paste0(
           scope,
-          "; GRIM/",
-          sd_test,
+          "; ",
+          waiting,
           if (sd_bound_skipped) " and SD bound",
-          " need N"
+          if (sd_given) " need N" else " needs N"
         )
       }
     )
@@ -624,7 +628,9 @@ evaluate_pair_t_test <- function(
   p_operator = "equals",
   sd_meaning = "sd_sample",
   type1 = NULL,
-  type2 = NULL
+  type2 = NULL,
+  items1 = 1,
+  items2 = 1
 ) {
   if (is.null(p_operator) || !nzchar(p_operator)) {
     p_operator <- "equals"
@@ -686,6 +692,20 @@ evaluate_pair_t_test <- function(
   if (sd1 < 0 || sd2 < 0) {
     return(list(status = "error", msg = "SD cannot be negative"))
   }
+  # The rows' own checks, e.g. a percentage above 100, which would otherwise
+  # be tested as given. Min and Max do not enter the t-test.
+  for (g in 1:2) {
+    err <- validate_combined_row(
+      list(m1s, m2s)[[g]],
+      list(sd1s, sd2s)[[g]],
+      list(n1s, n2s)[[g]],
+      list(items1, items2)[[g]],
+      list(type1, type2)[[g]]
+    )
+    if (!is.null(err)) {
+      return(list(status = "error", msg = paste0("Group ", g, ": ", err)))
+    }
+  }
   # N stays a double: recalc computes n1 + n2 - 2, which overflows integer
   # arithmetic for a combined N above about 2.1 billion and silently drops
   # Student's test.
@@ -733,10 +753,12 @@ evaluate_pair_t_test <- function(
   mixed_digits <- count_decimal_places(m1s) != count_decimal_places(m2s) ||
     count_decimal_places(sd1s) != count_decimal_places(sd2s)
   # `p_dp` is the reported p's own precision, which sets its rounding interval:
-  # "1" covers [0.5, 1]. `p_digits` is at least 1 and is what recalc and the
-  # display get.
+  # "1" covers [0.5, 1]. recalc gets at least 1 decimal place. The range is
+  # shown with at least 3, so that a coarse p such as ".5" does not turn it
+  # into [<0.1, <0.1].
   p_dp <- if (p_given) count_decimal_places(p_str) else 3L
-  p_digits <- max(1L, p_dp)
+  recalc_p_digits <- max(1L, p_dp)
+  p_digits <- max(3L, p_dp)
 
   # A finer value exactly halfway between two coarser ones (4.15 at 1 decimal)
   # has a rounding interval straddling both, so every such combination is
@@ -765,7 +787,7 @@ evaluate_pair_t_test <- function(
         sd_digits = sd_digits,
         rounding = "either",
         p = p_num,
-        p_digits = p_digits,
+        p_digits = recalc_p_digits,
         p_operator = p_operator,
         alternative = "two.sided",
         direction = "both"
@@ -821,7 +843,7 @@ evaluate_pair_t_test <- function(
   # lowest p of .0498 must not be shown as [0.05, ...].
   if (p_given && p_operator != "equals") {
     end <- if (startsWith(p_operator, "less")) min_p else max_p
-    p_digits <- p_digits + 1L
+    p_digits <- max(3L, p_dp + 1L)
     while (p_digits < 6L && round(end, p_digits) == p_num && end != p_num) {
       p_digits <- p_digits + 1L
     }
@@ -2274,6 +2296,16 @@ ui <- page_navbar(
             tags$li(
               "Notes about skipped tests name DEBIT for percentages, and",
               "adding a row beyond the maximum shows a message."
+            ),
+            tags$li(
+              "Without an SD, the note about a missing N names only GRIM.",
+              "\"Any mean\" rows no longer need Items, which they do not use."
+            ),
+            tags$li(
+              "t-test: a group whose row shows an error, such as a",
+              "percentage above 100, is no longer tested. A p reported with",
+              "0 to 2 decimals no longer shortens the range shown, which",
+              "could read \"[<0.1, <0.1]\"."
             )
           ),
           h5(class = "mt-4", "0.3.0 (2026-11-05)"),
@@ -2777,7 +2809,9 @@ server <- function(input, output, session) {
       input[[paste0("cb_pop_", p)]],
       input$cb_sd_meaning,
       input[[paste0("cb_type_", rid_a)]],
-      input[[paste0("cb_type_", rid_b)]]
+      input[[paste0("cb_type_", rid_b)]],
+      input[[paste0("cb_items_", rid_a)]],
+      input[[paste0("cb_items_", rid_b)]]
     )
   }
 
